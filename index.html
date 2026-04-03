@@ -3419,7 +3419,7 @@ function comFilter(f){
 
 // ── GESTIÓN DE GRUPOS ─────────────────────────────────────────────────────────
 function openGrupos(){
-  window._editandoGrupoIdx=null; // Siempre empieza en modo crear
+  window._editandoGrupoIdx=null;
   renderGruposModal();
   document.getElementById('modal-grupos').classList.add('open');
 }
@@ -3428,102 +3428,119 @@ var _grupoColorSeleccionado='#1a7a4a';
 var COLORS=['#1a7a4a','#2563eb','#7c3aed','#dc2626','#d97706','#0891b2','#be185d','#065f46','#92400e','#1e40af'];
 
 function buildTermList(containerId, checkedTerminales){
-  // Build terminal list with search - reusable for crear y editar
+  // Lee cuáles están actualmente marcados en el DOM antes de reconstruir
+  var container=document.getElementById(containerId);
+  if(!container) return;
+  var currentChecked=[];
+  container.querySelectorAll('.g-term-check:checked').forEach(function(cb){
+    currentChecked.push(cb.value);
+  });
+  // Combinar: los que venían marcados originalmente + los que el usuario marcó en el DOM
+  var allChecked=checkedTerminales.slice();
+  currentChecked.forEach(function(t){ if(allChecked.indexOf(t)<0) allChecked.push(t); });
+  // También quitar los que el usuario desmarcó (estaban en checkedTerminales pero no en DOM)
+  var domUnchecked=[];
+  container.querySelectorAll('.g-term-check:not(:checked)').forEach(function(cb){
+    domUnchecked.push(cb.value);
+  });
+  allChecked=allChecked.filter(function(t){ return domUnchecked.indexOf(t)<0; });
+
   var q=(document.getElementById('g-term-search')||{value:''}).value.toLowerCase().trim();
   var filtered=pdvs.filter(function(p){
     if(!q) return true;
-    return (p.nombre||'').toLowerCase().indexOf(q)>=0 || p.terminal.indexOf(q)>=0;
+    return (p.nombre||'').toLowerCase().indexOf(q)>=0||p.terminal.indexOf(q)>=0;
   });
-  var container=document.getElementById(containerId);
-  if(!container) return;
+  // Update the global checked list so saves use the latest
+  window._grupoEditChecked=allChecked;
+
   container.innerHTML=filtered.map(function(p){
     var g=getGrupoDeTerminal(p.terminal);
-    var checked=checkedTerminales.indexOf(p.terminal)>=0;
-    return'<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-radius:6px">'
+    var checked=allChecked.indexOf(p.terminal)>=0;
+    return'<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-radius:6px;hover:background:var(--gp)">'
       +'<input type="checkbox" class="g-term-check" value="'+p.terminal+'" '+(checked?'checked':'')+' style="cursor:pointer;width:16px;height:16px;flex-shrink:0"/>'
       +'<span style="font-size:14px;font-weight:500;flex:1">'+(p.nombre&&p.nombre!=='Prueba'?p.nombre:'Sin nombre')+'</span>'
       +'<span style="font-size:11px;color:var(--t3);font-family:monospace">'+p.terminal+'</span>'
-      +(g&&checkedTerminales.indexOf(p.terminal)<0?'<span style="background:'+g.color+'22;color:'+g.color+';font-size:10px;padding:2px 8px;border-radius:10px;font-weight:600">'+g.nombre+'</span>':'')
+      +(g&&!checked?'<span style="background:'+g.color+'22;color:'+g.color+';font-size:10px;padding:2px 8px;border-radius:10px;font-weight:600">'+g.nombre+'</span>':'')
       +'</label>';
-  }).join('') || '<div style="text-align:center;padding:12px;color:var(--t3);font-size:13px">Sin resultados</div>';
+  }).join('')||'<div style="text-align:center;padding:12px;color:var(--t3);font-size:13px">Sin resultados</div>';
+}
+
+function getCheckedTerminales(){
+  // Lee los checkboxes del contenedor correcto del modal
+  var list=document.getElementById('g-term-list');
+  if(!list) return [];
+  var checked=[];
+  list.querySelectorAll('.g-term-check:checked').forEach(function(cb){checked.push(cb.value);});
+  // Sumar los que estaban en _grupoEditChecked pero no visibles (filtrados por búsqueda)
+  var visible=[];
+  list.querySelectorAll('.g-term-check').forEach(function(cb){visible.push(cb.value);});
+  (window._grupoEditChecked||[]).forEach(function(t){
+    if(visible.indexOf(t)<0) checked.push(t); // no visible = mantener su estado previo
+  });
+  return checked;
 }
 
 function renderGruposModal(){
   var editandoGi=window._editandoGrupoIdx;
   var editando=editandoGi!==undefined&&editandoGi!==null?grupos[editandoGi]:null;
-  var html='';
-
-  // Solo mostrar lista si está editando, sino solo el form de crear
-
-  // Form crear o editar
   var isEdit=!!editando;
-  var checkedTerminales=isEdit?editando.terminales:[];
+  var checkedTerminales=isEdit?(editando.terminales||[]).slice():[];
   var nombreVal=isEdit?editando.nombre:'';
   var colorVal=isEdit?editando.color:COLORS[0];
 
+  window._grupoEditChecked=checkedTerminales.slice();
+
+  var html='';
   html+='<div style="background:var(--gp);border:1px solid var(--b2);border-radius:var(--rs);padding:16px" id="grupo-form">';
   html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">';
   html+='<div style="font-size:13px;font-weight:600;color:var(--gd)">'+(isEdit?'✏️ Editando: '+editando.nombre:'+ Crear nuevo grupo')+'</div>';
   if(isEdit) html+='<button class="bsm" onclick="window._editandoGrupoIdx=null;renderGruposModal()">Cancelar</button>';
   html+='</div>';
-
   html+='<div class="mrow" style="margin-bottom:12px">'
     +'<div class="fgm"><label>Nombre del grupo</label><input id="g-nombre" value="'+nombreVal+'" placeholder="Ej: Socio Juan, Zona Norte..."/></div>'
     +'<div class="fgm"><label>Color</label><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px" id="g-color-picker">'
     +COLORS.map(function(c){
       var sel=c===colorVal;
-      return'<div data-color="'+c+'" onclick="selectGrupoColor(this,this.getAttribute(&quot;data-color&quot;))" style="width:26px;height:26px;border-radius:50%;background:'+c+';cursor:pointer;border:2px solid '+(sel?c:'transparent')+';box-shadow:'+(sel?'0 0 0 2px white, 0 0 0 4px '+c:'none')+';transition:all .15s"></div>';
+      return'<div data-color="'+c+'" onclick="selectGrupoColor(this,this.getAttribute(&quot;data-color&quot;))" style="width:26px;height:26px;border-radius:50%;background:'+c+';cursor:pointer;border:2px solid '+(sel?c:'transparent')+';box-shadow:'+(sel?'0 0 0 2px white,0 0 0 4px '+c:'none')+';transition:all .15s"></div>';
     }).join('')
     +'</div></div></div>';
 
-  // Guardar checked en variable global para el oninput
-  window._grupoEditChecked=checkedTerminales;
-  // Buscador de terminales
   html+='<div class="fgm" style="margin-bottom:8px"><label>Terminales '+(isEdit?'del grupo':'a asignar')+'</label>'
-    +'<input id="g-term-search" placeholder="🔍  Buscar por nombre o número..." oninput="buildTermList(&quot;g-term-list&quot;,window._grupoEditChecked)" '
+    +'<input id="g-term-search" placeholder="🔍 Buscar por nombre o número..." oninput="buildTermList(&quot;g-term-list&quot;,window._grupoEditChecked)" '
     +'style="width:100%;padding:9px 12px;border:1.5px solid var(--b);border-radius:var(--rs);font-family:inherit;font-size:13px;margin-bottom:6px;box-sizing:border-box"/>'
-    +'<div id="g-term-list" style="max-height:220px;overflow-y:auto;border:1px solid var(--b);border-radius:var(--rs);padding:8px">'
+    +'<div id="g-term-list" style="max-height:240px;overflow-y:auto;border:1px solid var(--b);border-radius:var(--rs);padding:8px">'
     +'</div></div>';
 
-  html+='<button class="btn-save" style="width:100%" onclick="'+(isEdit?'guardarEditGrupo('+editandoGi+')':'crearGrupo()')+'">'+
+  html+='<button class="btn-save" style="width:100%;margin-top:4px" onclick="'+(isEdit?'guardarEditGrupo('+editandoGi+')':'crearGrupo()')+'">'+
     (isEdit?'💾 Guardar cambios':'Crear grupo')+'</button>';
   html+='</div>';
 
   document.getElementById('grupos-content').innerHTML=html;
-
-  // Init color picker selection
   _grupoColorSeleccionado=colorVal;
-
-  // Init terminal list
   buildTermList('g-term-list', checkedTerminales);
 }
 
 function selectGrupoColor(el,color){
   _grupoColorSeleccionado=color;
   document.querySelectorAll('[data-color]').forEach(function(d){
-    d.style.border='2px solid transparent';
-    d.style.boxShadow='none';
+    d.style.border='2px solid transparent';d.style.boxShadow='none';
   });
-  if(el){
-    el.style.border='2px solid '+color;
-    el.style.boxShadow='0 0 0 2px white, 0 0 0 4px '+color;
-  }
+  if(el){el.style.border='2px solid '+color;el.style.boxShadow='0 0 0 2px white,0 0 0 4px '+color;}
 }
 
 function crearGrupo(){
   var nombre=(document.getElementById('g-nombre').value||'').trim();
   if(!nombre){toast('Poné un nombre para el grupo');return;}
-  var checks=document.querySelectorAll('.g-term-check:checked');
-  var terminales=[];
-  checks.forEach(function(c){terminales.push(c.value);});
+  var terminales=getCheckedTerminales();
   // Quitar esas terminales de otros grupos
   grupos.forEach(function(g){
     g.terminales=g.terminales.filter(function(t){return terminales.indexOf(t)<0;});
   });
   grupos.push({id:'g-'+Date.now(),nombre:nombre,color:_grupoColorSeleccionado,terminales:terminales});
   saveGrupos();
+  window._editandoGrupoIdx=null;
   toast('Grupo "'+nombre+'" creado'+(terminales.length?' con '+terminales.length+' terminales':''));
-  renderGruposModal();
+  closeModal('modal-grupos');
   navigate('puntos');
 }
 
@@ -3538,10 +3555,8 @@ function guardarEditGrupo(gi){
   if(!g) return;
   var nombre=(document.getElementById('g-nombre').value||'').trim();
   if(!nombre){toast('Poné un nombre');return;}
-  var checks=document.querySelectorAll('.g-term-check:checked');
-  var terminales=[];
-  checks.forEach(function(c){terminales.push(c.value);});
-  // Quitar esas terminales de otros grupos
+  var terminales=getCheckedTerminales();
+  // Quitar esas terminales de otros grupos (no del propio)
   grupos.forEach(function(og,i){
     if(i!==gi) og.terminales=og.terminales.filter(function(t){return terminales.indexOf(t)<0;});
   });
@@ -3550,9 +3565,9 @@ function guardarEditGrupo(gi){
   g.terminales=terminales;
   saveGrupos();
   window._editandoGrupoIdx=null;
-  renderGruposModal();
+  toast('Grupo "'+nombre+'" actualizado con '+terminales.length+' terminales');
+  closeModal('modal-grupos');
   navigate('puntos');
-  toast('Grupo "'+nombre+'" actualizado');
 }
 
 function eliminarGrupoIdx(gi){
