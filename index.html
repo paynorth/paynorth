@@ -3213,6 +3213,7 @@ function sortTxsByFecha(txs){
 function acumularEnSemanaExistente(key){
   var h=historial[key];
   if(!h){toast('Semana no encontrada');return;}
+
   // Dedup global contra TODO el historial (excluyendo esta semana que ya conoce sus propias txs)
   var nuevas=filtrarNuevasContraHistorial(transactions, key);
   var dupCount=transactions.length-nuevas.length;
@@ -3220,23 +3221,66 @@ function acumularEnSemanaExistente(key){
     toast('No hay operaciones nuevas — '+dupCount+' duplicadas eliminadas');
     return;
   }
-  h.txs=sortTxsByFecha(h.txs.concat(nuevas));
-  // Recalcular todo
-  var allApr=h.txs.filter(function(t){return t.estado==='aprobada';});
-  h.vol=allApr.reduce(function(s,t){return s+t.monto;},0);
-  h.com=allApr.reduce(function(s,t){
-    var pdv=pdvs.find(function(p){return p.terminal===t.terminal;});
-    if(!pdv) return s;
-    return s+(t.monto*(t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr)/100);
-  },0);
-  h.costo=allApr.reduce(function(s,t){
-    return s+(t.monto*(t.tipo==='credito'?costoPN.cred:t.tipo==='debito'?costoPN.deb:costoPN.qr)/100);
-  },0);
-  h.txCount=h.txs.length;
-  h.savedAt=new Date().toISOString();
+
+  // SEPARAR POR SEMANA: las que pertenecen a esta semana van acá, las otras crean semanas nuevas
+  function getMondayOf(d){var day=d.getDay()||7;var mon=new Date(d);mon.setDate(d.getDate()-day+1);mon.setHours(0,0,0,0);return mon;}
+  function getSundayOf(mon){var sun=new Date(mon);sun.setDate(mon.getDate()+6);return sun;}
+  function fmtDate(d){return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();}
+  function mondayKey(d){var m=getMondayOf(d);return m.getFullYear()+'-'+String(m.getMonth()+1).padStart(2,'0')+'-'+String(m.getDate()).padStart(2,'0');}
+
+  var grupos={};
+  nuevas.forEach(function(t){
+    if(!t.fecha) return;
+    var parts=t.fecha.split('/');
+    if(parts.length<3) return;
+    var d=new Date(parseInt(parts[2]),parseInt(parts[1])-1,parseInt(parts[0]));
+    var wk=mondayKey(d);
+    if(!grupos[wk]){
+      var mon=getMondayOf(d);
+      grupos[wk]={from:fmtDate(mon),to:fmtDate(getSundayOf(mon)),txs:[]};
+    }
+    grupos[wk].txs.push(t);
+  });
+
+  var wkKeys=Object.keys(grupos).sort();
+  var resumenSemanas=[];
+  var agregadasEstaSemana=0;
+  var semanasCreadas=0;
+
+  wkKeys.forEach(function(wk){
+    var g=grupos[wk];
+    if(wk===key){
+      // Las que pertenecen a ESTA semana: acumular como antes
+      h.txs=sortTxsByFecha(h.txs.concat(g.txs));
+      var allApr=h.txs.filter(function(t){return t.estado==='aprobada';});
+      h.vol=allApr.reduce(function(s,t){return s+t.monto;},0);
+      h.com=allApr.reduce(function(s,t){
+        var pdv=pdvs.find(function(p){return p.terminal===t.terminal;});
+        if(!pdv) return s;
+        return s+(t.monto*(t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr)/100);
+      },0);
+      h.costo=allApr.reduce(function(s,t){
+        return s+(t.monto*(t.tipo==='credito'?costoPN.cred:t.tipo==='debito'?costoPN.deb:costoPN.qr)/100);
+      },0);
+      h.txCount=h.txs.length;
+      h.savedAt=new Date().toISOString();
+      dbSaveHistorialWeek(h);
+      agregadasEstaSemana=g.txs.length;
+      resumenSemanas.push(g.from+'—'+g.to+' (+'+g.txs.length+' a semana actual)');
+    } else {
+      // Las que NO son de esta semana: crear semana nueva (o acumular si ya existe)
+      guardarSemanaEnHistorial(g.from, g.to, g.txs);
+      semanasCreadas++;
+      resumenSemanas.push(g.from+'—'+g.to+' ('+g.txs.length+' ops → semana nueva)');
+    }
+  });
+
   saveHistorial();
-  dbSaveHistorialWeek(h);
-  toast('✅ '+nuevas.length+' operaciones agregadas'+(dupCount>0?' · '+dupCount+' duplicadas ignoradas':'')+' — total: '+h.txCount);
+
+  var msg='✅ '+nuevas.length+' operaciones procesadas';
+  if(dupCount>0) msg+=' · '+dupCount+' duplicadas ignoradas';
+  if(semanasCreadas>0) msg+=' · '+semanasCreadas+' semana'+(semanasCreadas!==1?'s':'')+' nueva'+(semanasCreadas!==1?'s':'')+' creada'+(semanasCreadas!==1?'s':'');
+  toast(msg);
   navigate('guardar');
 }
 
