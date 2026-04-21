@@ -3050,27 +3050,39 @@ function renderGuardar(){
   var autoTo=txFrom?fmtDate(getSundayOf(getMondayOf(txFrom))):wr.to;
   var autoKey=weekKey(autoFrom);
 
-  // Verificar si ya existe esa semana en historial
-  var semanaExistente=autoKey&&historial[autoKey]?historial[autoKey]:null;
+  // SEMANA ACTIVA: la que el usuario seleccionó manualmente, o la autodetectada
+  var activeKey=window._semanaActivaKey||autoKey;
+  var semanaActiva=activeKey&&historial[activeKey]?historial[activeKey]:null;
+
+  // Si hay semana activa seleccionada, usar sus fechas; sino usar las autodetectadas
+  var displayFrom=semanaActiva?semanaActiva.from:autoFrom;
+  var displayTo=semanaActiva?semanaActiva.to:autoTo;
+  var displayKey=semanaActiva?semanaActiva.key:autoKey;
+
   var semanas=Object.values(historial).sort(function(a,b){return b.key.localeCompare(a.key);});
 
   var html='<div class="ph"><h2>Cierre de Semana</h2><p>Registrá y cerrá la semana operativa</p></div>';
 
-  // Banner de semana detectada
+  // Banner de semana activa/detectada
   if(hasTx&&txFrom){
     var apr=transactions.filter(function(t){return t.estado==='aprobada';});
     var vol=apr.reduce(function(s,t){return s+t.monto;},0);
     var txDates={};
     transactions.forEach(function(t){if(t.fecha) txDates[t.fecha]=true;});
     var fechasUnicas=Object.keys(txDates).sort();
+    var seleccionManual=!!window._semanaActivaKey;
 
-    html+='<div style="background:'+(semanaExistente?'var(--abg)':'var(--gl)')+';border:1.5px solid '+(semanaExistente?'#f0c879':'var(--b)')+';border-radius:14px;padding:20px;margin-bottom:18px">';
+    html+='<div style="background:'+(semanaActiva?'var(--abg)':'var(--gl)')+';border:1.5px solid '+(semanaActiva?'#f0c879':'var(--b)')+';border-radius:14px;padding:20px;margin-bottom:18px">';
     html+='<div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px">';
-    html+='<div>';
-    if(semanaExistente){
-      html+='<div style="font-size:13px;font-weight:700;color:var(--amb);margin-bottom:4px">⚠️ Esta semana ya tiene datos guardados</div>';
-      html+='<div style="font-size:14px;font-weight:600;color:var(--t)">'+semanaExistente.label+' — '+semanaExistente.from+' al '+semanaExistente.to+'</div>';
-      html+='<div style="font-size:12px;color:var(--t3);margin-top:4px">Ya guardadas: <strong>'+semanaExistente.txCount+' operaciones</strong> · Vol: <strong>'+fmt(semanaExistente.vol)+'</strong></div>';
+    html+='<div style="flex:1;min-width:280px">';
+    if(semanaActiva){
+      var badge=seleccionManual?'📌 Semana seleccionada manualmente':'⚠️ Esta semana ya tiene datos guardados';
+      html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
+      html+='<div style="font-size:13px;font-weight:700;color:var(--amb)">'+badge+'</div>';
+      if(seleccionManual) html+='<button class="bsm" style="padding:2px 10px;font-size:11px" onclick="seleccionarSemanaActiva(null)">✕ Usar autodetección</button>';
+      html+='</div>';
+      html+='<div style="font-size:14px;font-weight:600;color:var(--t)">'+semanaActiva.label+' — '+semanaActiva.from+' al '+semanaActiva.to+'</div>';
+      html+='<div style="font-size:12px;color:var(--t3);margin-top:4px">Ya guardadas: <strong>'+semanaActiva.txCount+' operaciones</strong> · Vol: <strong>'+fmt(semanaActiva.vol)+'</strong></div>';
       html+='<div style="font-size:12px;color:var(--t2);margin-top:6px">📅 Días en el CSV actual: <strong>'+fechasUnicas.join(', ')+'</strong></div>';
     } else {
       html+='<div style="font-size:13px;font-weight:700;color:var(--gd);margin-bottom:4px">✅ Semana detectada automáticamente</div>';
@@ -3085,8 +3097,8 @@ function renderGuardar(){
     html+='</div></div>';
 
     html+='<div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">';
-    if(semanaExistente){
-      html+='<button class="btn-save" style="flex:1;padding:12px;font-size:14px" onclick="acumularEnSemanaExistente(\''+autoKey+'\')">➕ Agregar a semana existente ('+semanaExistente.txCount+' ops → +'+(transactions.length)+' más)</button>';
+    if(semanaActiva){
+      html+='<button class="btn-save" style="flex:1;padding:12px;font-size:14px" onclick="acumularEnSemanaExistente(\''+displayKey+'\')">➕ Agregar a esta semana ('+semanaActiva.txCount+' ops → +'+(transactions.length)+' más)</button>';
       html+='<button class="bsm" onclick="var f=document.getElementById(\'guardar-manual-form\');f.style.display=f.style.display===\'none\'?\'block\':\'none\'" style="padding:12px 18px">📝 Guardar como semana nueva</button>';
     } else {
       html+='<button class="btn-save" style="flex:1;padding:12px;font-size:14px" onclick="guardarSemanaAuto()">💾 Guardar semana '+autoFrom+' al '+autoTo+'</button>';
@@ -3122,16 +3134,25 @@ function renderGuardar(){
   if(!semanas.length){
     html+='<div style="text-align:center;padding:28px;color:var(--t3);font-size:13px">Aún no hay semanas guardadas</div>';
   } else {
+    html+='<div style="font-size:12px;color:var(--t3);margin-bottom:10px">💡 Hacé click en cualquier semana para seleccionarla como semana activa y cargar operaciones en ella.</div>';
     html+='<div class="tw"><table><thead><tr><th>Semana</th><th>Período</th><th>Operaciones</th><th>Vol.</th><th>Comisión</th><th>Acciones</th></tr></thead><tbody>';
     semanas.slice(0,8).forEach(function(h){
-      var esActual=autoKey&&h.key===autoKey;
-      html+='<tr style="'+(esActual?'background:#fffbeb':'')+'">';
-      html+='<td><strong>'+h.label+'</strong>'+(esActual?' <span style="font-size:10px;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:8px;font-weight:600">SEMANA ACTUAL</span>':'')+'</td>';
+      var esAuto=autoKey&&h.key===autoKey;
+      var esActiva=activeKey&&h.key===activeKey;
+      var rowBg=esActiva?'background:#fef3c7':'';
+      html+='<tr style="cursor:pointer;'+rowBg+'" onclick="seleccionarSemanaActiva(\''+h.key+'\')" onmouseover="if(!this.dataset.active)this.style.background=\'#f3f4f6\'" onmouseout="if(!this.dataset.active)this.style.background=\''+(esActiva?'#fef3c7':'')+'\'" '+(esActiva?'data-active="1"':'')+'>';
+      html+='<td><strong>'+h.label+'</strong>';
+      if(esActiva) html+=' <span style="font-size:10px;background:#f59e0b;color:white;padding:2px 8px;border-radius:8px;font-weight:700">ACTIVA</span>';
+      else if(esAuto) html+=' <span style="font-size:10px;background:#d1fae5;color:#065f46;padding:2px 6px;border-radius:8px;font-weight:600">AUTODETECTADA</span>';
+      html+='</td>';
       html+='<td style="font-size:12px;color:var(--t3)">'+h.from+' al '+h.to+'</td>';
       html+='<td style="text-align:center"><strong>'+h.txCount+'</strong></td>';
       html+='<td>'+fmt(h.vol)+'</td>';
       html+='<td style="color:var(--gd);font-weight:500">'+fmt(h.com)+'</td>';
-      html+='<td><button class="bsm pdf" onclick="cargarSemanaEnMemoria(\''+h.key+'\')">+ Agregar más</button></td>';
+      html+='<td onclick="event.stopPropagation()">';
+      if(!esActiva) html+='<button class="bsm pdf" onclick="seleccionarSemanaActiva(\''+h.key+'\')">📌 Seleccionar</button>';
+      else html+='<span style="font-size:11px;color:var(--amb);font-weight:600">✓ Seleccionada</span>';
+      html+='</td>';
       html+='</tr>';
     });
     html+='</tbody></table></div>';
@@ -3139,6 +3160,12 @@ function renderGuardar(){
   html+='</div>';
 
   return html;
+}
+
+
+function seleccionarSemanaActiva(key){
+  window._semanaActivaKey=key||null;
+  navigate('guardar');
 }
 
 function guardarSemanaAuto(){
@@ -3213,7 +3240,6 @@ function sortTxsByFecha(txs){
 function acumularEnSemanaExistente(key){
   var h=historial[key];
   if(!h){toast('Semana no encontrada');return;}
-
   // Dedup global contra TODO el historial (excluyendo esta semana que ya conoce sus propias txs)
   var nuevas=filtrarNuevasContraHistorial(transactions, key);
   var dupCount=transactions.length-nuevas.length;
@@ -3221,66 +3247,23 @@ function acumularEnSemanaExistente(key){
     toast('No hay operaciones nuevas — '+dupCount+' duplicadas eliminadas');
     return;
   }
-
-  // SEPARAR POR SEMANA: las que pertenecen a esta semana van acá, las otras crean semanas nuevas
-  function getMondayOf(d){var day=d.getDay()||7;var mon=new Date(d);mon.setDate(d.getDate()-day+1);mon.setHours(0,0,0,0);return mon;}
-  function getSundayOf(mon){var sun=new Date(mon);sun.setDate(mon.getDate()+6);return sun;}
-  function fmtDate(d){return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();}
-  function mondayKey(d){var m=getMondayOf(d);return m.getFullYear()+'-'+String(m.getMonth()+1).padStart(2,'0')+'-'+String(m.getDate()).padStart(2,'0');}
-
-  var grupos={};
-  nuevas.forEach(function(t){
-    if(!t.fecha) return;
-    var parts=t.fecha.split('/');
-    if(parts.length<3) return;
-    var d=new Date(parseInt(parts[2]),parseInt(parts[1])-1,parseInt(parts[0]));
-    var wk=mondayKey(d);
-    if(!grupos[wk]){
-      var mon=getMondayOf(d);
-      grupos[wk]={from:fmtDate(mon),to:fmtDate(getSundayOf(mon)),txs:[]};
-    }
-    grupos[wk].txs.push(t);
-  });
-
-  var wkKeys=Object.keys(grupos).sort();
-  var resumenSemanas=[];
-  var agregadasEstaSemana=0;
-  var semanasCreadas=0;
-
-  wkKeys.forEach(function(wk){
-    var g=grupos[wk];
-    if(wk===key){
-      // Las que pertenecen a ESTA semana: acumular como antes
-      h.txs=sortTxsByFecha(h.txs.concat(g.txs));
-      var allApr=h.txs.filter(function(t){return t.estado==='aprobada';});
-      h.vol=allApr.reduce(function(s,t){return s+t.monto;},0);
-      h.com=allApr.reduce(function(s,t){
-        var pdv=pdvs.find(function(p){return p.terminal===t.terminal;});
-        if(!pdv) return s;
-        return s+(t.monto*(t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr)/100);
-      },0);
-      h.costo=allApr.reduce(function(s,t){
-        return s+(t.monto*(t.tipo==='credito'?costoPN.cred:t.tipo==='debito'?costoPN.deb:costoPN.qr)/100);
-      },0);
-      h.txCount=h.txs.length;
-      h.savedAt=new Date().toISOString();
-      dbSaveHistorialWeek(h);
-      agregadasEstaSemana=g.txs.length;
-      resumenSemanas.push(g.from+'—'+g.to+' (+'+g.txs.length+' a semana actual)');
-    } else {
-      // Las que NO son de esta semana: crear semana nueva (o acumular si ya existe)
-      guardarSemanaEnHistorial(g.from, g.to, g.txs);
-      semanasCreadas++;
-      resumenSemanas.push(g.from+'—'+g.to+' ('+g.txs.length+' ops → semana nueva)');
-    }
-  });
-
+  h.txs=sortTxsByFecha(h.txs.concat(nuevas));
+  // Recalcular todo
+  var allApr=h.txs.filter(function(t){return t.estado==='aprobada';});
+  h.vol=allApr.reduce(function(s,t){return s+t.monto;},0);
+  h.com=allApr.reduce(function(s,t){
+    var pdv=pdvs.find(function(p){return p.terminal===t.terminal;});
+    if(!pdv) return s;
+    return s+(t.monto*(t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr)/100);
+  },0);
+  h.costo=allApr.reduce(function(s,t){
+    return s+(t.monto*(t.tipo==='credito'?costoPN.cred:t.tipo==='debito'?costoPN.deb:costoPN.qr)/100);
+  },0);
+  h.txCount=h.txs.length;
+  h.savedAt=new Date().toISOString();
   saveHistorial();
-
-  var msg='✅ '+nuevas.length+' operaciones procesadas';
-  if(dupCount>0) msg+=' · '+dupCount+' duplicadas ignoradas';
-  if(semanasCreadas>0) msg+=' · '+semanasCreadas+' semana'+(semanasCreadas!==1?'s':'')+' nueva'+(semanasCreadas!==1?'s':'')+' creada'+(semanasCreadas!==1?'s':'');
-  toast(msg);
+  dbSaveHistorialWeek(h);
+  toast('✅ '+nuevas.length+' operaciones agregadas'+(dupCount>0?' · '+dupCount+' duplicadas ignoradas':'')+' — total: '+h.txCount);
   navigate('guardar');
 }
 
