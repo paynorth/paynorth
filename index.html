@@ -859,34 +859,95 @@ function weekLabel(dateStr){
 }
 
 // Guardar semana actual en historial cuando se importa un CSV
+
+// ── HELPERS DE DEDUPLICACIÓN (deben estar antes de usarse) ────────────────────
+// Genera ID único para deduplicar — SOLO usa cupón o QR ID
+function txUniqueIdEarly(t){
+  if(t.esQRTransferencia){
+    if(t.nroAutorizacion&&String(t.nroAutorizacion).trim()) return 'qr:'+String(t.nroAutorizacion).trim();
+    if(t.nroCupon&&String(t.nroCupon).trim()&&String(t.nroCupon).trim()!=='0') return 'qrcup:'+String(t.nroCupon).trim();
+    return null;
+  }
+  if(t.nroCupon&&String(t.nroCupon).trim()&&String(t.nroCupon).trim()!=='0') return 'cup:'+String(t.nroCupon).trim();
+  return null;
+}
+
+// Ordena transacciones por fecha ascendente
+function sortTxsByFechaEarly(txs){
+  return txs.slice().sort(function(a,b){
+    function toDate(f){
+      if(!f) return 0;
+      var p=f.split('/');
+      if(p.length<3) return 0;
+      return new Date(parseInt(p[2]),parseInt(p[1])-1,parseInt(p[0])).getTime();
+    }
+    return toDate(a.fecha)-toDate(b.fecha);
+  });
+}
+
+// FILTRA txs nuevas contra TODO el historial - core del anti-duplicado
+// excludeKey: semana que estamos actualizando (no deduplica contra sí misma si es acumulado)
+function filtrarNuevasContraHistorial(txsNuevas, excludeKey){
+  // Paso 1: construir set de IDs existentes en TODO el historial
+  var idsExistentes={};
+  Object.keys(historial).forEach(function(k){
+    if(k===excludeKey) return; // saltear la semana que estamos acumulando
+    var h=historial[k];
+    if(!h||!h.txs) return;
+    h.txs.forEach(function(t){
+      var id=txUniqueIdEarly(t);
+      if(id) idsExistentes[id]=true;
+    });
+  });
+  
+  // Si estamos acumulando, también incluir las txs ya existentes en esa semana
+  if(excludeKey&&historial[excludeKey]&&historial[excludeKey].txs){
+    historial[excludeKey].txs.forEach(function(t){
+      var id=txUniqueIdEarly(t);
+      if(id) idsExistentes[id]=true;
+    });
+  }
+  
+  // Paso 2: filtrar las nuevas - mantener solo las que NO están en el historial
+  // Además deduplicar entre las nuevas entre sí
+  var idsVistos={};
+  var resultado=[];
+  txsNuevas.forEach(function(t){
+    var id=txUniqueIdEarly(t);
+    if(!id){
+      // Sin ID único - siempre agregar (no podemos verificar si es duplicado)
+      resultado.push(t);
+      return;
+    }
+    if(idsExistentes[id]) return; // ya está en el historial
+    if(idsVistos[id]) return; // duplicado dentro del mismo batch
+    idsVistos[id]=true;
+    resultado.push(t);
+  });
+  
+  return resultado;
+}
+
+
 function guardarSemanaEnHistorial(from, to, txs){
   var key=weekKey(from)||('manual-'+Date.now());
-  var apr=txs.filter(function(t){return t.estado==='aprobada';});
-  var volTotal=apr.reduce(function(s,t){return s+t.monto;},0);
-  var comTotal=apr.reduce(function(s,t){
-    var pdv=pdvs.find(function(p){return p.terminal===t.terminal;});
-    if(!pdv) return s;
-    var r=t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr;
-    return s+(t.monto*(r||0)/100);
-  },0);
-  var costoTotal=apr.reduce(function(s,t){
-    var r=t.tipo==='credito'?costoPN.cred:t.tipo==='debito'?costoPN.deb:costoPN.qr;
-    return s+(t.monto*(r||0)/100);
-  },0);
-  if(historial[key]){
-    // ACUMULAR: dedup robusto y ordenar por fecha
-    var existingIdsH={};
-    historial[key].txs.forEach(function(t){
-      var id=txUniqueId(t);
-      if(id) existingIdsH[id]=true;
-    });
-    var nuevas=txs.filter(function(t){
-      var id=txUniqueId(t);
-      if(!id) return true; // sin ID único → siempre agregar
-      return !existingIdsH[id];
-    });
-    historial[key].txs=sortTxsByFecha(historial[key].txs.concat(nuevas));
-    // Recalcular totales desde las transacciones acumuladas
+  var yaExiste=!!historial[key];
+
+  // PASO 1: Filtrar duplicados contra TODO el historial global
+  // Si ya existe esa semana, excluirla del filtro (porque queremos agregar operaciones nuevas a ella)
+  var txsLimpias=filtrarNuevasContraHistorial(txs, yaExiste?key:null);
+  var dupGlobal=txs.length-txsLimpias.length;
+
+  // PASO 2: Validación - si no hay nada nuevo, avisar y no guardar
+  if(!txsLimpias.length){
+    toast('⚠️ Todas las operaciones ('+txs.length+') ya estaban en el historial — nada nuevo para guardar');
+    return false;
+  }
+
+  if(yaExiste){
+    // ACUMULAR en semana existente
+    historial[key].txs=sortTxsByFechaEarly(historial[key].txs.concat(txsLimpias));
+    // Recalcular totales con TODAS las aprobadas (viejas + nuevas)
     var allApr=historial[key].txs.filter(function(t){return t.estado==='aprobada';});
     historial[key].vol=allApr.reduce(function(s,t){return s+t.monto;},0);
     historial[key].com=allApr.reduce(function(s,t){
@@ -900,23 +961,43 @@ function guardarSemanaEnHistorial(from, to, txs){
       return s+(t.monto*(r||0)/100);
     },0);
     historial[key].txCount=historial[key].txs.length;
-    historial[key].to=to;
     historial[key].savedAt=new Date().toISOString();
-    toast('✅ '+nuevas.length+' operaciones nuevas agregadas a la semana existente ('+historial[key].txs.length+' total)');
   } else {
+    // NUEVA semana - calcular totales solo con las limpias
+    var apr=txsLimpias.filter(function(t){return t.estado==='aprobada';});
+    var volTotal=apr.reduce(function(s,t){return s+t.monto;},0);
+    var comTotal=apr.reduce(function(s,t){
+      var pdv=pdvs.find(function(p){return p.terminal===t.terminal;});
+      if(!pdv) return s;
+      var r=t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr;
+      return s+(t.monto*(r||0)/100);
+    },0);
+    var costoTotal=apr.reduce(function(s,t){
+      var r=t.tipo==='credito'?costoPN.cred:t.tipo==='debito'?costoPN.deb:costoPN.qr;
+      return s+(t.monto*(r||0)/100);
+    },0);
+
     historial[key]={
       key:key, label:weekLabel(from),
       from:from, to:to,
       vol:volTotal, com:comTotal, costo:costoTotal,
-      txCount:txs.length,
-      txs:sortTxsByFecha(txs), // Ordenadas por fecha
+      txCount:txsLimpias.length,
+      txs:sortTxsByFechaEarly(txsLimpias),
       savedAt:new Date().toISOString()
     };
   }
+
   saveHistorial();
+  if(supa) dbSaveHistorialWeek(historial[key]);
+
+  var accion=yaExiste?'agregadas a':'guardadas en';
+  var msg='✅ '+txsLimpias.length+' operaciones '+accion+' "'+historial[key].label+'"';
+  if(dupGlobal>0) msg+=' · '+dupGlobal+' duplicadas descartadas';
+  toast(msg);
+
+  return true;
 }
 
-// Obtener datos agrupados por período para el gráfico
 function getChartData(periodo){
   // periodo: '3m','6m','1a','2a','todo'
   var ahora=new Date();
@@ -3112,17 +3193,8 @@ function sortTxsByFecha(txs){
 function acumularEnSemanaExistente(key){
   var h=historial[key];
   if(!h){toast('Semana no encontrada');return;}
-  // Dedup robusto: cupón > autorización > fecha+terminal+monto+tipo
-  var existingIds={};
-  h.txs.forEach(function(t){
-    var id=txUniqueId(t);
-    if(id) existingIds[id]=true;
-  });
-  var nuevas=transactions.filter(function(t){
-    var id=txUniqueId(t);
-    if(!id) return true; // sin ID único → siempre agregar (no deduplicar)
-    return !existingIds[id];
-  });
+  // Dedup global contra TODO el historial (excluyendo esta semana que ya conoce sus propias txs)
+  var nuevas=filtrarNuevasContraHistorial(transactions, key);
   var dupCount=transactions.length-nuevas.length;
   if(!nuevas.length){
     toast('No hay operaciones nuevas — '+dupCount+' duplicadas eliminadas');
