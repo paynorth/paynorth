@@ -858,6 +858,21 @@ function weekLabel(dateStr){
   return 'Sem '+MESES_CORTOS[d.getMonth()]+' '+d.getFullYear();
 }
 
+// Normaliza fechas de CSV a formato D/M/YYYY (el que usa el resto del sistema)
+// Acepta: "2026-04-19" (ISO), "19/4/2026", "19/04/2026", "2026/04/19"
+function normalizeFecha(raw){
+  if(!raw) return '';
+  var s=String(raw).trim();
+  if(!s) return '';
+  // ISO: YYYY-MM-DD o YYYY/MM/DD (4 digitos adelante)
+  var mIso=s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if(mIso) return parseInt(mIso[3],10)+'/'+parseInt(mIso[2],10)+'/'+mIso[1];
+  // DD/MM/YYYY o D/M/YYYY (ya en formato destino)
+  var mDmy=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if(mDmy) return parseInt(mDmy[1],10)+'/'+parseInt(mDmy[2],10)+'/'+mDmy[3];
+  return s; // fallback: devolver como vino
+}
+
 // Guardar semana actual en historial cuando se importa un CSV
 
 // ── HELPERS DE DEDUPLICACIÓN (deben estar antes de usarse) ────────────────────
@@ -2043,7 +2058,7 @@ function processCSVQR(text){
 
     // Convertir al mismo formato que tarjetas para que todo el sistema lo lea igual
     txs.push({
-      fecha          : iF>=0?(cols[iF]||''):'',
+      fecha          : iF>=0?normalizeFecha(cols[iF]||''):'',
       terminal       : iTerm>=0?(cols[iTerm]||'').trim():'',
       establecimiento: '',
       lote           : iLote>=0?(cols[iLote]||''):'',
@@ -2203,7 +2218,7 @@ function processCSV(text){
 
     txs.push({
       terminal    : (cols[iT]||'').trim(),
-      fecha       : iF>=0?(cols[iF]||''):'',
+      fecha       : iF>=0?normalizeFecha(cols[iF]||''):'',
       establecimiento: iEst>=0?(cols[iEst]||''):'',
       lote        : iLote>=0?(cols[iLote]||''):'',
       tipo        : tipo,
