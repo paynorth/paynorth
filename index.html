@@ -2342,6 +2342,45 @@ function renderLiquidaciones(){
     +(periodoLabel?'<div style="margin-top:8px;font-size:12px;color:var(--gd)">📅 '+periodoLabel+(periodoFrom?' — '+periodoFrom+' al '+periodoTo:'')+'</div>':'')
     +'</div>';
 
+  // ── LIQUIDAR POR GRUPO ─────────────────────────────────────────────────
+  var gruposGlobal=(typeof grupos!=='undefined'&&Array.isArray(grupos))?grupos:[];
+  if(gruposGlobal.length>0&&txsFuente.length>0){
+    html+='<div class="card" style="margin-bottom:16px">';
+    html+='<div class="ctitle" style="margin-bottom:4px">👥 Liquidar por grupo</div>';
+    html+='<div style="font-size:12px;color:var(--t3);margin-bottom:12px">Generá los PDFs individuales del grupo o un resumen consolidado para el cliente</div>';
+    gruposGlobal.forEach(function(g){
+      var termsConOps=g.terminales.filter(function(term){
+        return txsFuente.some(function(tx){return tx.terminal===term&&tx.estado==='aprobada';});
+      });
+      var volG=0,comG=0;
+      termsConOps.forEach(function(term){
+        var pp=pdvs.find(function(x){return x.terminal===term;});
+        if(!pp) return;
+        txsFuente.filter(function(tx){return tx.terminal===term&&tx.estado==='aprobada';}).forEach(function(tx){
+          volG+=tx.monto;
+          var r=tx.tipo==='credito'?pp.comCred:tx.tipo==='debito'?pp.comDeb:pp.comQr;
+          comG+=tx.monto*(r||0)/100;
+        });
+      });
+      var sinOps=g.terminales.length-termsConOps.length;
+      html+='<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--s2);border-radius:10px;margin-bottom:8px;border-left:4px solid '+(g.color||'#1a7a4a')+';flex-wrap:wrap">';
+      html+='<div style="flex:1;min-width:200px">';
+      html+='<div style="font-size:14px;font-weight:700;color:var(--t)">'+g.nombre+'</div>';
+      html+='<div style="font-size:11px;color:var(--t3);margin-top:2px">'+termsConOps.length+' con ops'+(sinOps>0?' · '+sinOps+' sin ops':'')+' · Vol '+fmt(volG)+' · Comisión '+fmt(comG)+'</div>';
+      html+='</div>';
+      html+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
+      if(termsConOps.length>0){
+        html+='<button class="bsm pdf" onclick="generateGroupPDFs(\''+g.id+'\')" title="Un PDF individual por cada terminal del grupo">📄 PDFs individuales</button>';
+        html+='<button class="bsm" onclick="generateGroupSummary(\''+g.id+'\')" title="Un solo PDF con el resumen consolidado del grupo">📊 Resumen para '+g.nombre+'</button>';
+      } else {
+        html+='<span style="font-size:11px;color:var(--t3);padding:6px 10px">Sin operaciones en este período</span>';
+      }
+      html+='</div>';
+      html+='</div>';
+    });
+    html+='</div>';
+  }
+
   // Calcular por terminal usando txsFuente
   var activos=pdvs.filter(function(p){return p.estado==='activo';});
   var conDatos=activos.filter(function(p){
@@ -2523,16 +2562,237 @@ function generatePDF(){
 }
 
 function generateAll(){
-  var wr=weekRange();
+  // Usar la semana seleccionada en el dropdown (misma lógica que los PDF individuales)
+  var periodo=window._liqPeriodo||'actual';
+  var semsOrd=Object.values(historial).sort(function(a,b){return b.key.localeCompare(a.key);});
+  var semElegida=null;
+  if(periodo==='actual'){
+    semElegida=semsOrd[0]||null;
+  } else {
+    semElegida=historial[periodo]||null;
+  }
+  if(!semElegida||!semElegida.txs||!semElegida.txs.length){
+    toast('⚠️ No hay datos para el período seleccionado');
+    return;
+  }
+  var from=semElegida.from, to=semElegida.to;
+  var txsSem=semElegida.txs;
+
+  // Solo terminales activas QUE ADEMÁS tienen operaciones aprobadas en esta semana
   var activos=pdvs.filter(function(p){return p.estado==='activo';});
-  activos.forEach(function(p,i){
+  var conDatos=activos.filter(function(p){
+    return txsSem.some(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
+  });
+  if(!conDatos.length){
+    toast('⚠️ Ninguna terminal activa tiene operaciones en '+from+' al '+to);
+    return;
+  }
+
+  conDatos.forEach(function(p,i){
     setTimeout(function(){
-      var v=calcTx(p);var com=calcCom(p,v);
+      var txsTerm=txsSem.filter(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
+      var cred=txsTerm.reduce(function(s,t){return s+(t.tipo==='credito'?t.monto:0);},0);
+      var deb=txsTerm.reduce(function(s,t){return s+(t.tipo==='debito'?t.monto:0);},0);
+      var qr=txsTerm.reduce(function(s,t){return s+(t.tipo==='qr'?t.monto:0);},0);
+      var v={cred:cred,deb:deb,qr:qr,real:true,txs:txsTerm};
+      var com=calcCom(p,v);
       var num='LIQ-'+new Date().getFullYear()+'-'+String(pdvs.indexOf(p)+1).padStart(3,'0')+'-'+Math.floor(Math.random()*900+100);
-      buildPDF(p,v,wr.from,wr.to,num,com);
+      buildPDF(p,v,from,to,num,com);
     },i*700);
   });
-  toast('Generando '+activos.length+' PDFs...');
+  toast('Generando '+conDatos.length+' PDFs para '+from+' al '+to+'...');
+}
+
+// ── LIQUIDAR POR GRUPO: PDFs individuales ──────────────────────────────
+// Genera un PDF por cada terminal del grupo que tenga operaciones
+function generateGroupPDFs(groupId){
+  var gruposArr=(typeof grupos!=='undefined'&&Array.isArray(grupos))?grupos:[];
+  var g=gruposArr.find(function(gg){return gg.id===groupId;});
+  if(!g){toast('Grupo no encontrado');return;}
+
+  var periodo=window._liqPeriodo||'actual';
+  var semsOrd=Object.values(historial).sort(function(a,b){return b.key.localeCompare(a.key);});
+  var semElegida=periodo==='actual'?(semsOrd[0]||null):(historial[periodo]||null);
+  if(!semElegida||!semElegida.txs||!semElegida.txs.length){
+    toast('⚠️ No hay datos para el período seleccionado');return;
+  }
+  var from=semElegida.from,to=semElegida.to,txsSem=semElegida.txs;
+
+  var pdvsGrupo=pdvs.filter(function(p){
+    return p.estado==='activo'
+      &&g.terminales.indexOf(p.terminal)>=0
+      &&txsSem.some(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
+  });
+  if(!pdvsGrupo.length){
+    toast('⚠️ Ninguna terminal del grupo '+g.nombre+' tiene operaciones en '+from+' al '+to);return;
+  }
+
+  pdvsGrupo.forEach(function(p,i){
+    setTimeout(function(){
+      var txsTerm=txsSem.filter(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
+      var cred=txsTerm.reduce(function(s,t){return s+(t.tipo==='credito'?t.monto:0);},0);
+      var deb=txsTerm.reduce(function(s,t){return s+(t.tipo==='debito'?t.monto:0);},0);
+      var qr=txsTerm.reduce(function(s,t){return s+(t.tipo==='qr'?t.monto:0);},0);
+      var v={cred:cred,deb:deb,qr:qr,real:true,txs:txsTerm};
+      var com=calcCom(p,v);
+      var num='LIQ-'+new Date().getFullYear()+'-'+String(pdvs.indexOf(p)+1).padStart(3,'0')+'-'+Math.floor(Math.random()*900+100);
+      buildPDF(p,v,from,to,num,com);
+    },i*700);
+  });
+  toast('Generando '+pdvsGrupo.length+' PDFs del grupo '+g.nombre+' para '+from+' al '+to+'...');
+}
+
+// ── LIQUIDAR POR GRUPO: Resumen consolidado ────────────────────────────
+// Un solo PDF con los totales del grupo, para mandar al cliente (partner)
+// IMPORTANTE: solo muestra lo que PayNorth le cobra a las terminales.
+// NO muestra lo que Payway le cobra a PayNorth (costoPN).
+function generateGroupSummary(groupId){
+  var gruposArr=(typeof grupos!=='undefined'&&Array.isArray(grupos))?grupos:[];
+  var g=gruposArr.find(function(gg){return gg.id===groupId;});
+  if(!g){toast('Grupo no encontrado');return;}
+
+  var periodo=window._liqPeriodo||'actual';
+  var semsOrd=Object.values(historial).sort(function(a,b){return b.key.localeCompare(a.key);});
+  var semElegida=periodo==='actual'?(semsOrd[0]||null):(historial[periodo]||null);
+  if(!semElegida||!semElegida.txs||!semElegida.txs.length){
+    toast('⚠️ No hay datos para el período seleccionado');return;
+  }
+  var from=semElegida.from,to=semElegida.to,txsSem=semElegida.txs;
+
+  var filas=[];
+  var totCred=0,totDeb=0,totQr=0,totOps=0,totCom=0;
+  g.terminales.forEach(function(term){
+    var p=pdvs.find(function(pp){return pp.terminal===term;});
+    if(!p) return;
+    var txsT=txsSem.filter(function(t){return t.terminal===term&&t.estado==='aprobada';});
+    if(!txsT.length) return;
+    var cred=txsT.reduce(function(s,t){return s+(t.tipo==='credito'?t.monto:0);},0);
+    var deb=txsT.reduce(function(s,t){return s+(t.tipo==='debito'?t.monto:0);},0);
+    var qr=txsT.reduce(function(s,t){return s+(t.tipo==='qr'?t.monto:0);},0);
+    var total=cred+deb+qr;
+    var com=cred*(p.comCred||0)/100+deb*(p.comDeb||0)/100+qr*(p.comQr||0)/100;
+    filas.push({p:p,ops:txsT.length,cred:cred,deb:deb,qr:qr,total:total,com:com,entrega:total-com});
+    totCred+=cred;totDeb+=deb;totQr+=qr;totOps+=txsT.length;totCom+=com;
+  });
+  if(!filas.length){
+    toast('⚠️ Ninguna terminal del grupo '+g.nombre+' tiene operaciones en '+from+' al '+to);return;
+  }
+
+  var jsPDF=window.jspdf.jsPDF;
+  var doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+  var W=210,pH=297;
+  var C={dark:[22,90,58],mid:[34,139,87],light:[236,248,241],accent:[52,197,119],
+    white:[255,255,255],gray:[248,249,248],line:[220,232,224],txt:[30,40,34],
+    muted:[120,145,130],red:[180,40,40]};
+  var now=new Date();
+  function fd(d){return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();}
+  var emision=fd(now);
+  function fv(val){return(val&&val>0)?'$'+Math.round(val).toLocaleString('es-AR'):'$ -';}
+
+  // Header (mismo estilo que buildPDF)
+  doc.setFillColor(C.dark[0],C.dark[1],C.dark[2]);doc.rect(0,0,8,pH,'F');
+  doc.setFillColor(C.mid[0],C.mid[1],C.mid[2]);doc.circle(24,18,10,'F');
+  doc.setTextColor(255,255,255);doc.setFontSize(8.5);doc.setFont('helvetica','bold');
+  doc.text('Pay',24,15.5,{align:'center'});doc.setFontSize(6.5);doc.setFont('helvetica','normal');
+  doc.text('North',24,20,{align:'center'});
+  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(17);doc.setFont('helvetica','bold');
+  doc.text('PayNorth',38,16);doc.setFontSize(7.5);doc.setFont('helvetica','normal');
+  doc.setTextColor(C.muted[0],C.muted[1],C.muted[2]);doc.text('Soluciones de pago',38,21.5);
+  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(11);doc.setFont('helvetica','bold');
+  doc.text('RESUMEN DE GRUPO',W-12,12,{align:'right'});
+  doc.setFontSize(7.5);doc.setFont('helvetica','normal');doc.setTextColor(C.muted[0],C.muted[1],C.muted[2]);
+  doc.text('Periodo: '+from+' al '+to,W-12,17,{align:'right'});
+  doc.text('Emision: '+emision,W-12,22,{align:'right'});
+  doc.setDrawColor(C.accent[0],C.accent[1],C.accent[2]);doc.setLineWidth(1);doc.line(12,32,W-12,32);
+
+  // Banner con nombre del grupo
+  var y=36;
+  doc.setFillColor(C.light[0],C.light[1],C.light[2]);doc.roundedRect(12,y,W-24,18,3,3,'F');
+  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(14);doc.setFont('helvetica','bold');
+  doc.text('Grupo: '+g.nombre,18,y+9);
+  doc.setFontSize(8);doc.setFont('helvetica','normal');doc.setTextColor(C.muted[0],C.muted[1],C.muted[2]);
+  doc.text(filas.length+' terminales con operaciones  -  '+totOps+' operaciones aprobadas',18,y+14.5);
+  y=60;
+
+  // Tabla 1: Volumen por terminal
+  var rowsVol=filas.map(function(f){
+    return[f.p.terminal,(f.p.nombre||'-'),String(f.ops),fv(f.cred),fv(f.deb),fv(f.qr),fv(f.total)];
+  });
+  rowsVol.push(['','TOTAL',String(totOps),fv(totCred),fv(totDeb),fv(totQr),fv(totCred+totDeb+totQr)]);
+
+  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(8);doc.setFont('helvetica','bold');
+  doc.text('VOLUMEN POR TERMINAL',12,y);
+  doc.setLineWidth(0.4);doc.setDrawColor(C.accent[0],C.accent[1],C.accent[2]);
+  doc.line(12,y+1.5,W-12,y+1.5);y+=3;
+  doc.autoTable({
+    startY:y,margin:{left:12,right:12},tableWidth:186,
+    head:[['Terminal','Nombre','Ops','Credito','Debito','QR','Total']],
+    body:rowsVol,
+    headStyles:{fillColor:C.dark,textColor:C.white,fontSize:7,fontStyle:'bold',halign:'center'},
+    bodyStyles:{fontSize:7.5,textColor:C.txt,cellPadding:2,halign:'right'},
+    columnStyles:{0:{halign:'left',cellWidth:20},1:{halign:'left',cellWidth:42},2:{halign:'center',cellWidth:14},3:{cellWidth:26},4:{cellWidth:26},5:{cellWidth:26},6:{cellWidth:32}},
+    alternateRowStyles:{fillColor:C.gray},
+    tableLineColor:C.line,tableLineWidth:0.2,
+    didParseCell:function(data){
+      if(data.row.index===rowsVol.length-1){
+        data.cell.styles.fontStyle='bold';
+        data.cell.styles.fillColor=C.light;
+        data.cell.styles.textColor=C.dark;
+      }
+    }
+  });
+  y=doc.lastAutoTable.finalY+6;
+
+  // Tabla 2: Comisión y monto a entregar por terminal
+  var rowsCom=filas.map(function(f){
+    return[f.p.terminal,(f.p.nombre||'-'),fv(f.total),fv(f.com),fv(f.entrega)];
+  });
+  rowsCom.push(['','TOTAL',fv(totCred+totDeb+totQr),fv(totCom),fv((totCred+totDeb+totQr)-totCom)]);
+
+  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(8);doc.setFont('helvetica','bold');
+  doc.text('COMISION Y MONTO A ENTREGAR POR TERMINAL',12,y);
+  doc.line(12,y+1.5,W-12,y+1.5);y+=3;
+  doc.autoTable({
+    startY:y,margin:{left:12,right:12},tableWidth:186,
+    head:[['Terminal','Nombre','Volumen','Comision','A entregar']],
+    body:rowsCom,
+    headStyles:{fillColor:C.dark,textColor:C.white,fontSize:7,fontStyle:'bold',halign:'center'},
+    bodyStyles:{fontSize:7.5,textColor:C.txt,cellPadding:2,halign:'right'},
+    columnStyles:{0:{halign:'left',cellWidth:22},1:{halign:'left',cellWidth:60},2:{cellWidth:36},3:{cellWidth:34},4:{cellWidth:34}},
+    alternateRowStyles:{fillColor:C.gray},
+    tableLineColor:C.line,tableLineWidth:0.2,
+    didParseCell:function(data){
+      if(data.row.index===rowsCom.length-1){
+        data.cell.styles.fontStyle='bold';
+        data.cell.styles.fillColor=C.light;
+        data.cell.styles.textColor=C.dark;
+      }
+    }
+  });
+  y=doc.lastAutoTable.finalY+8;
+
+  // Resumen final
+  var volTotal=totCred+totDeb+totQr;
+  var aEntregar=volTotal-totCom;
+  doc.autoTable({
+    startY:y,margin:{left:100,right:12},
+    body:[['Volumen total',fv(volTotal)],['Comision PayNorth','-'+fv(totCom)],['TOTAL A ENTREGAR',fv(aEntregar)]],
+    bodyStyles:{fontSize:9,textColor:C.txt,cellPadding:3},
+    columnStyles:{0:{halign:'left',cellWidth:60},1:{halign:'right',cellWidth:35}},
+    tableLineColor:C.line,tableLineWidth:0.3,
+    didParseCell:function(data){
+      if(data.row.index===2){data.cell.styles.fontStyle='bold';data.cell.styles.fontSize=11;data.cell.styles.fillColor=C.dark;data.cell.styles.textColor=C.white;}
+      if(data.row.index===1){data.cell.styles.textColor=C.red;}
+    }
+  });
+
+  // Footer
+  doc.setFillColor(C.dark[0],C.dark[1],C.dark[2]);doc.rect(0,pH-12,W,12,'F');
+  doc.setTextColor(C.accent[0],C.accent[1],C.accent[2]);doc.setFontSize(7);doc.setFont('helvetica','normal');
+  doc.text('PayNorth  |  Resumen de grupo '+g.nombre+'  |  '+from+' al '+to+'  |  Emitido el '+emision,W/2,pH-5,{align:'center'});
+
+  doc.save('PayNorth_Grupo_'+g.nombre.replace(/\s+/g,'_')+'_'+from.replace(/\//g,'-')+'.pdf');
+  toast('📊 Resumen generado: '+g.nombre);
 }
 
 function buildPDF(p,v,from,to,num,com){
