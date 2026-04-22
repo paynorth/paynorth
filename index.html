@@ -3689,9 +3689,20 @@ function toast(msg){
   setTimeout(function(){t.classList.remove('show');},3500);
 }
 
-['modal-pdv','modal-liq','modal-grupos','modal-asignar'].forEach(function(id){
+// ── Cierre por click afuera ──
+// modal-pdv: NO cierra por click afuera (tiene form con muchos campos, evita perder datos)
+//   → solo cierra con los botones Cancelar o Guardar
+// Los demás: cierran por click afuera PERO con chequeo de mousedown
+//   → si arrancás el drag adentro y soltás afuera, NO cierra (protege selección de texto)
+['modal-liq','modal-grupos','modal-asignar'].forEach(function(id){
   var el=document.getElementById(id);
-  if(el) el.addEventListener('click',function(e){if(e.target===this)closeModal(id);});
+  if(!el) return;
+  var mousedownOnOverlay=false;
+  el.addEventListener('mousedown',function(e){ mousedownOnOverlay=(e.target===this); });
+  el.addEventListener('click',function(e){
+    if(e.target===this && mousedownOnOverlay) closeModal(id);
+    mousedownOnOverlay=false;
+  });
 });
 
 function renderBalance(){
