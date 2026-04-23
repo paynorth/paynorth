@@ -6163,12 +6163,10 @@ window.aplicarRefinamientosPorRol = function(){
     card.querySelectorAll("*").forEach(function(el){
       if(el.children.length !== 0) return;
       var t = el.textContent.trim();
-      if(/^[A-Za-zÁÉÍÓÚÑáéíóúñ0-9\s.º°]+(,|Buenos|Aires)/.test(t) && t.length > 8 && t.length < 80 && !/^activo$|^inactivo$|^\d+$/i.test(t)){
-        if(!/^\d{6,10}$/.test(t)){
-          var font = window.getComputedStyle(el).fontSize;
-          if(parseFloat(font) <= 13){ el.style.display = "none"; }
-        }
-      }
+      if(!t || /^activo$|^inactivo$/i.test(t) || /Estado PDV/i.test(t)) return;
+      if(/^\d{6,10}$/.test(t)) return;
+      var font = window.getComputedStyle(el).fontSize;
+      if(parseFloat(font) <= 11.5){ el.style.display = "none"; }
     });
   });
   if(er === "socio"){
