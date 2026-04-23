@@ -6151,6 +6151,34 @@ window.aplicarRefinamientosPorRol = function(){
     var t = el.textContent.trim().toUpperCase();
     if(/^(COMISIÓN|COMISIONES|NETO|NETO TOTAL)\b/.test(t)&&/\$[\d.,\-]+/.test(t)&&t.length<60) el.style.display="none";
   });
+  document.querySelectorAll("button").forEach(function(b){
+    var t = b.textContent.trim();
+    if(/^\+\s*Ops$/.test(t) || /^Limpiar todo$/i.test(t) || t === "×" || t === "✕" || t === "x"){
+      b.style.display = "none";
+    }
+  });
+  document.querySelectorAll(".ctitle").forEach(function(h){
+    if(!/Estado PDV/i.test(h.textContent)) return;
+    var card = h.closest(".card"); if(!card) return;
+    card.querySelectorAll("*").forEach(function(el){
+      if(el.children.length !== 0) return;
+      var t = el.textContent.trim();
+      if(/^[A-Za-zÁÉÍÓÚÑáéíóúñ0-9\s.º°]+(,|Buenos|Aires)/.test(t) && t.length > 8 && t.length < 80 && !/^activo$|^inactivo$|^\d+$/i.test(t)){
+        if(!/^\d{6,10}$/.test(t)){
+          var font = window.getComputedStyle(el).fontSize;
+          if(parseFloat(font) <= 13){ el.style.display = "none"; }
+        }
+      }
+    });
+  });
+  if(er === "socio"){
+    document.querySelectorAll("button").forEach(function(b){
+      var t = b.textContent.trim();
+      if(/^\s*(📄|📃)?\s*PDF\s*$/i.test(t) || t === "PDF"){
+        b.style.display = "none";
+      }
+    });
+  }
 };
 window.enterPreview = function(ctx){
   window._previewOriginal = {pdvs:pdvs.slice(), historial:historial, transactions:transactions.slice()};
@@ -6186,11 +6214,13 @@ window.exitPreview = function(){
   if(window._navHooked) return;
   var _origNav = window.navigate;
   window.navigate = function(v){
+    if(window._previewCtx){ var _m=document.querySelector(".main"); if(_m) _m.style.visibility="hidden"; }
     var r = _origNav.apply(this, arguments);
     if(window._previewCtx){
       setTimeout(function(){
         window.mostrarBannerPreview(); window.filtrarMenuPorRol(); window.aplicarRefinamientosPorRol();
-      }, 80);
+        var _m=document.querySelector(".main"); if(_m) _m.style.visibility="visible";
+      }, 50);
     }
     if(v==="usuarios" && !window._previewCtx){
       setTimeout(function(){ window.inyectarBotonPreview && window.inyectarBotonPreview(); }, 100);
