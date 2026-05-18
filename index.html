@@ -241,7 +241,13 @@ tbody td{padding:12px 13px}
     </div>
     <div class="mrow">
       <div class="fgm"><label>📱 QR (%)</label><input type="number" id="fqr" placeholder="0.80" step="0.01"/></div>
-      <div class="fgm"><label>🤝 Propinas (%)</label><input type="number" id="fprop" placeholder="0.00" step="0.01"/></div>
+      <div class="fgm"><label>🤝 Propinas — Modo</label>
+        <select id="fpropmodo" onchange="onPropModoChange()" style="width:100%;padding:9px 12px;border:1.5px solid var(--b);border-radius:var(--rs);font-family:inherit;font-size:13px;background:#fff">
+          <option value="mismo">Mismo % que créd/déb/QR (según tipo de venta)</option>
+          <option value="fijo">% fijo específico para propinas</option>
+        </select>
+      </div>
+      <div class="fgm" id="fprop-wrap" style="display:none"><label>% Fijo de propina</label><input type="number" id="fprop" placeholder="0.00" step="0.01"/></div>
     </div>
     <div class="mrow">
       <div class="fgm"><label>CBU / Alias pago</label><input id="fcbu" placeholder="alias.mercadopago"/></div>
@@ -546,7 +552,7 @@ async function dbLoadPDVs(){
           terminal:r.terminal||'', nombre:r.nombre||'Prueba', resp:r.resp||'',
           cuit:r.cuit||'', tel:r.tel||'', email:r.email||'', dir:r.dir||'',
           estado:r.estado||'activo', comCred:r.com_cred||0, comDeb:r.com_deb||0,
-          comQr:r.com_qr||0, comProp:r.com_prop||0, cbu:r.cbu||'', volMensual:r.vol_mensual||0,
+          comQr:r.com_qr||0, comProp:r.com_prop||0, propModo:r.prop_modo||'mismo', cbu:r.cbu||'', volMensual:r.vol_mensual||0,
           _id:r.id
         };
       });
@@ -561,7 +567,7 @@ async function dbSavePDV(pdv){
     terminal:pdv.terminal, nombre:pdv.nombre, resp:pdv.resp, cuit:pdv.cuit,
     tel:pdv.tel, email:pdv.email, dir:pdv.dir, estado:pdv.estado,
     com_cred:pdv.comCred, com_deb:pdv.comDeb, com_qr:pdv.comQr,
-    com_prop:pdv.comProp, cbu:pdv.cbu, vol_mensual:pdv.volMensual
+    com_prop:pdv.comProp, prop_modo:pdv.propModo||'mismo', cbu:pdv.cbu, vol_mensual:pdv.volMensual
   };
   try{
     var res=await supa.from('pdvs').upsert(row,{onConflict:'terminal'});
@@ -858,91 +864,18 @@ function weekLabel(dateStr){
   return 'Sem '+MESES_CORTOS[d.getMonth()]+' '+d.getFullYear();
 }
 
-// Normaliza fechas de CSV a formato D/M/YYYY (el que usa el resto del sistema)
-// Acepta: "2026-04-19" (ISO), "19/4/2026", "19/04/2026", "2026/04/19"
-function normalizeFecha(raw){
-  if(!raw) return '';
-  var s=String(raw).trim();
-  if(!s) return '';
-  // ISO: YYYY-MM-DD o YYYY/MM/DD (4 digitos adelante)
-  var mIso=s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
-  if(mIso) return parseInt(mIso[3],10)+'/'+parseInt(mIso[2],10)+'/'+mIso[1];
-  // DD/MM/YYYY o D/M/YYYY (ya en formato destino)
-  var mDmy=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-  if(mDmy) return parseInt(mDmy[1],10)+'/'+parseInt(mDmy[2],10)+'/'+mDmy[3];
-  return s; // fallback: devolver como vino
-}
-
 // Guardar semana actual en historial cuando se importa un CSV
 
 // ── HELPERS DE DEDUPLICACIÓN (deben estar antes de usarse) ────────────────────
-// Genera ID único para deduplicar
-// Prioridad: UUID (único global) > QR ID (para QR) > composite (terminal+cupon+fecha+monto)
-// El número de cupón SOLO es único dentro de una terminal — por eso no se usa solo
+// Genera ID único para deduplicar — SOLO usa cupón o QR ID
 function txUniqueIdEarly(t){
-  // UUID del CSV de Payway — único global, mejor opción
-  if(t.uuid&&String(t.uuid).trim()) return 'uuid:'+String(t.uuid).trim();
   if(t.esQRTransferencia){
-    // QR ID (guardado en nroAutorizacion) — único global
     if(t.nroAutorizacion&&String(t.nroAutorizacion).trim()) return 'qr:'+String(t.nroAutorizacion).trim();
     if(t.nroCupon&&String(t.nroCupon).trim()&&String(t.nroCupon).trim()!=='0') return 'qrcup:'+String(t.nroCupon).trim();
     return null;
   }
-  // Fallback para tarjetas sin UUID: composite key que sí es único por operación
-  if(t.nroCupon&&String(t.nroCupon).trim()&&String(t.nroCupon).trim()!=='0'){
-    return 'comp:'+(t.terminal||'')+'|'+String(t.nroCupon).trim()+'|'+(t.fecha||'')+'|'+(t.monto||0);
-  }
+  if(t.nroCupon&&String(t.nroCupon).trim()&&String(t.nroCupon).trim()!=='0') return 'cup:'+String(t.nroCupon).trim();
   return null;
-}
-
-// Cancela operaciones devueltas con su venta aprobada original.
-// Payway reporta una venta aprobada y su devolución como 2 operaciones
-// separadas (la devolución con monto negativo y estado "Devuelto").
-// Si dejamos solo la aprobada, el volumen queda inflado en el monto devuelto.
-// Esta función busca cada devuelta y elimina tanto ella como su venta original.
-// Match: mismo terminal, mismo tipo, |monto| igual, fecha ±1 día.
-// Devuelve: {txs: array limpio, canceladas: N pares, devueltasSinMatch: N huérfanas}
-function cancelarDevueltasConSuVenta(txs){
-  function fechaMs(f){
-    if(!f) return 0;
-    var p=f.split('/');
-    if(p.length!==3) return 0;
-    var dd=parseInt(p[0],10), mm=parseInt(p[1],10)-1, yy=parseInt(p[2],10);
-    return new Date(yy,mm,dd).getTime();
-  }
-  var DAY=86400000;
-  var idxBorrar={};
-  var canceladas=0, sinMatch=0;
-  for(var i=0;i<txs.length;i++){
-    if(txs[i].estado!=='devuelta') continue;
-    if(idxBorrar[i]) continue;
-    var t=txs[i];
-    var montoAbs=Math.abs(t.monto);
-    var tMs=fechaMs(t.fecha);
-    var matchIdx=-1;
-    for(var j=0;j<txs.length;j++){
-      if(j===i||idxBorrar[j]) continue;
-      var s=txs[j];
-      if(s.estado!=='aprobada') continue;
-      if(s.terminal!==t.terminal) continue;
-      if(s.tipo!==t.tipo) continue;
-      if(Math.abs(Math.abs(s.monto)-montoAbs)>0.01) continue;
-      var sMs=fechaMs(s.fecha);
-      if(Math.abs(sMs-tMs)>DAY) continue;
-      matchIdx=j; break;
-    }
-    if(matchIdx>=0){
-      idxBorrar[i]=1;
-      idxBorrar[matchIdx]=1;
-      canceladas++;
-    } else {
-      sinMatch++;
-    }
-  }
-  if(canceladas===0) return {txs:txs, canceladas:0, devueltasSinMatch:sinMatch};
-  var limpio=[];
-  for(var k=0;k<txs.length;k++){ if(!idxBorrar[k]) limpio.push(txs[k]); }
-  return {txs:limpio, canceladas:canceladas, devueltasSinMatch:sinMatch};
 }
 
 // Ordena transacciones por fecha ascendente
@@ -1006,17 +939,6 @@ function guardarSemanaEnHistorial(from, to, txs){
   var key=weekKey(from)||('manual-'+Date.now());
   var yaExiste=!!historial[key];
 
-  // PASO 0a: Cancelar ventas que fueron devueltas en el mismo período
-  // (elimina el par venta+devolución para que no queden "ventas fantasma")
-  var cancelRes=cancelarDevueltasConSuVenta(txs);
-  txs=cancelRes.txs;
-  var paresCanceladas=cancelRes.canceladas;
-
-  // PASO 0b: Filtrar solo APROBADAS — las rechazadas/anuladas/pendientes no se liquidan
-  var totalRecibidas=txs.length;
-  txs=txs.filter(function(t){return t.estado==='aprobada';});
-  var descartadas=totalRecibidas-txs.length;
-
   // PASO 1: Filtrar duplicados contra TODO el historial global
   // Si ya existe esa semana, excluirla del filtro (porque queremos agregar operaciones nuevas a ella)
   var txsLimpias=filtrarNuevasContraHistorial(txs, yaExiste?key:null);
@@ -1024,10 +946,7 @@ function guardarSemanaEnHistorial(from, to, txs){
 
   // PASO 2: Validación - si no hay nada nuevo, avisar y no guardar
   if(!txsLimpias.length){
-    var msg='⚠️ Nada nuevo para guardar';
-    if(descartadas>0) msg+=' · '+descartadas+' no aprobadas descartadas';
-    if(dupGlobal>0) msg+=' · '+dupGlobal+' ya estaban en el historial';
-    toast(msg);
+    toast('⚠️ Todas las operaciones ('+txs.length+') ya estaban en el historial — nada nuevo para guardar');
     return false;
   }
 
@@ -1079,7 +998,6 @@ function guardarSemanaEnHistorial(from, to, txs){
 
   var accion=yaExiste?'agregadas a':'guardadas en';
   var msg='✅ '+txsLimpias.length+' operaciones '+accion+' "'+historial[key].label+'"';
-  if(paresCanceladas>0) msg+=' · '+paresCanceladas+' venta'+(paresCanceladas>1?'s':'')+' cancelada'+(paresCanceladas>1?'s':'')+' con su devolución';
   if(dupGlobal>0) msg+=' · '+dupGlobal+' duplicadas descartadas';
   toast(msg);
 
@@ -1432,7 +1350,21 @@ function navigate(page){
   if(page==='importar')initDrop();
 }
 
-function fmt(n){if(n===undefined||n===null||isNaN(n))return'$0,00';return'$'+(+n).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});}
+
+// Calcula la comisión de propina según el modo del PDV
+function comPropinaDe(t, pdv){
+  if(!t.propina||t.propina<=0||!pdv) return 0;
+  var modo=pdv.propModo||'mismo';
+  if(modo==='fijo'){
+    return t.propina*(pdv.comProp||0)/100;
+  }
+  // 'mismo' — usar la comisión del tipo de transacción
+  var pct=t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr;
+  return t.propina*(pct||0)/100;
+}
+
+
+function fmt(n){return'$'+Math.round(n).toLocaleString('es-AR');}
 function pct(n){return(n||0).toFixed(2)+'%';}
 function simVol(p){var v=p.volMensual||0;return{cred:v*.55,deb:v*.30,qr:v*.15};}
 function getActiveTxs(){
@@ -2127,12 +2059,11 @@ function processCSVQR(text){
     var estRaw=norm(cols[iEst]||'');
     var estado=(estRaw.indexOf('apr')>=0||estRaw.indexOf('acep')>=0)?'aprobada':'rechazada';
     if(estRaw.indexOf('anul')>=0) estado='anulada';
-    if(estRaw.indexOf('devuelt')>=0) estado='devuelta';
     if(estRaw==='otro'||estRaw.indexOf('otro')>=0) estado='pendiente';
 
     // Convertir al mismo formato que tarjetas para que todo el sistema lo lea igual
     txs.push({
-      fecha          : iF>=0?normalizeFecha(cols[iF]||''):'',
+      fecha          : iF>=0?(cols[iF]||''):'',
       terminal       : iTerm>=0?(cols[iTerm]||'').trim():'',
       establecimiento: '',
       lote           : iLote>=0?(cols[iLote]||''):'',
@@ -2231,7 +2162,6 @@ function processCSV(text){
   var iCup  = fi(['nro cupon','nrocupon','cupon']);
   var iAut  = fi(['nro autorizacion','autorizacion']);
   var iProp = fi(['propina']);
-  var iUUID = fi(['uuid']);
 
   // Diagnóstico en consola si falla
   if(iT<0||iM<0){
@@ -2281,12 +2211,11 @@ function processCSV(text){
     // Si MARCA vacía, fallback a columna TIPO
     else if(!marcaRaw&&tipoColRaw.indexOf('deb')>=0) tipo='debito';
 
-    // ESTADO: Payway usa "Aprobado" (con O) / "Rechazado" / "Otro" / "Devuelto"
+    // ESTADO: Payway usa "Aprobado" (con O) / "Rechazado" / "Otro"
     var estRaw=norm(cols[iE]||'');
     var estado='rechazada'; // default
     if(estRaw.indexOf('apr')>=0||estRaw.indexOf('acep')>=0||estRaw==='ok'||estRaw==='1') estado='aprobada';
     else if(estRaw.indexOf('anul')>=0) estado='anulada';
-    else if(estRaw.indexOf('devuelt')>=0) estado='devuelta';
     else if(estRaw==='otro'||estRaw.indexOf('otro')>=0) estado='pendiente'; // Payway usa "Otro" — quedan como pendientes para revisar
 
     // Propina (si existe)
@@ -2294,7 +2223,7 @@ function processCSV(text){
 
     txs.push({
       terminal    : (cols[iT]||'').trim(),
-      fecha       : iF>=0?normalizeFecha(cols[iF]||''):'',
+      fecha       : iF>=0?(cols[iF]||''):'',
       establecimiento: iEst>=0?(cols[iEst]||''):'',
       lote        : iLote>=0?(cols[iLote]||''):'',
       tipo        : tipo,
@@ -2309,25 +2238,18 @@ function processCSV(text){
       propina     : propina,
       nroCupon    : iCup>=0?(cols[iCup]||''):'',
       nroAutorizacion: iAut>=0?(cols[iAut]||''):'',
-      uuid        : iUUID>=0?(cols[iUUID]||'').trim():'',
     });
   }
 
   // Mantener las QR que ya estaban cargadas — no sobreescribir
   var qrExistentes=transactions.filter(function(t){return t.esQRTransferencia;});
-  // Dedup tarjetas por UUID (si hay) o por terminal+cupon+fecha+monto
-  function cardKey(t){
-    if(t.uuid&&String(t.uuid).trim()) return 'uuid:'+String(t.uuid).trim();
-    if(t.nroCupon) return 'comp:'+(t.terminal||'')+'|'+t.nroCupon+'|'+(t.fecha||'')+'|'+t.monto;
-    return null;
-  }
-  var existingKeys={};
+  // Dedup tarjetas por nroCupon
+  var existingCupones={};
   transactions.filter(function(t){return !t.esQRTransferencia;}).forEach(function(t){
-    var k=cardKey(t); if(k) existingKeys[k]=true;
+    if(t.nroCupon) existingCupones[t.nroCupon]=true;
   });
   var nuevasTarjetas=txs.filter(function(t){
-    var k=cardKey(t);
-    return !k||!existingKeys[k];
+    return !t.nroCupon||!existingCupones[t.nroCupon];
   });
   // Reconstruir: tarjetas nuevas + QR existentes
   transactions=nuevasTarjetas.concat(qrExistentes);
@@ -2400,45 +2322,6 @@ function renderLiquidaciones(){
     +'</div>'
     +(periodoLabel?'<div style="margin-top:8px;font-size:12px;color:var(--gd)">📅 '+periodoLabel+(periodoFrom?' — '+periodoFrom+' al '+periodoTo:'')+'</div>':'')
     +'</div>';
-
-  // ── LIQUIDAR POR GRUPO ─────────────────────────────────────────────────
-  var gruposGlobal=(typeof grupos!=='undefined'&&Array.isArray(grupos))?grupos:[];
-  if(gruposGlobal.length>0&&txsFuente.length>0){
-    html+='<div class="card" style="margin-bottom:16px">';
-    html+='<div class="ctitle" style="margin-bottom:4px">👥 Liquidar por grupo</div>';
-    html+='<div style="font-size:12px;color:var(--t3);margin-bottom:12px">Generá los PDFs individuales del grupo o un resumen consolidado para el cliente</div>';
-    gruposGlobal.forEach(function(g){
-      var termsConOps=g.terminales.filter(function(term){
-        return txsFuente.some(function(tx){return tx.terminal===term&&tx.estado==='aprobada';});
-      });
-      var volG=0,comG=0;
-      termsConOps.forEach(function(term){
-        var pp=pdvs.find(function(x){return x.terminal===term;});
-        if(!pp) return;
-        txsFuente.filter(function(tx){return tx.terminal===term&&tx.estado==='aprobada';}).forEach(function(tx){
-          volG+=tx.monto;
-          var r=tx.tipo==='credito'?pp.comCred:tx.tipo==='debito'?pp.comDeb:pp.comQr;
-          comG+=tx.monto*(r||0)/100;
-        });
-      });
-      var sinOps=g.terminales.length-termsConOps.length;
-      html+='<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--s2);border-radius:10px;margin-bottom:8px;border-left:4px solid '+(g.color||'#1a7a4a')+';flex-wrap:wrap">';
-      html+='<div style="flex:1;min-width:200px">';
-      html+='<div style="font-size:14px;font-weight:700;color:var(--t)">'+g.nombre+'</div>';
-      html+='<div style="font-size:11px;color:var(--t3);margin-top:2px">'+termsConOps.length+' con ops'+(sinOps>0?' · '+sinOps+' sin ops':'')+' · Vol '+fmt(volG)+' · Comisión '+fmt(comG)+'</div>';
-      html+='</div>';
-      html+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
-      if(termsConOps.length>0){
-        html+='<button class="bsm pdf" onclick="generateGroupPDFs(\''+g.id+'\')" title="Un PDF individual por cada terminal del grupo" style="min-width:175px;justify-content:center">📄 PDFs individuales</button>';
-        html+='<button class="bsm" onclick="generateGroupSummary(\''+g.id+'\')" title="Un solo PDF con el resumen consolidado del grupo" style="min-width:215px;justify-content:center">📊 Resumen para '+g.nombre+'</button>';
-      } else {
-        html+='<span style="font-size:11px;color:var(--t3);padding:6px 10px">Sin operaciones en este período</span>';
-      }
-      html+='</div>';
-      html+='</div>';
-    });
-    html+='</div>';
-  }
 
   // Calcular por terminal usando txsFuente
   var activos=pdvs.filter(function(p){return p.estado==='activo';});
@@ -2621,237 +2504,16 @@ function generatePDF(){
 }
 
 function generateAll(){
-  // Usar la semana seleccionada en el dropdown (misma lógica que los PDF individuales)
-  var periodo=window._liqPeriodo||'actual';
-  var semsOrd=Object.values(historial).sort(function(a,b){return b.key.localeCompare(a.key);});
-  var semElegida=null;
-  if(periodo==='actual'){
-    semElegida=semsOrd[0]||null;
-  } else {
-    semElegida=historial[periodo]||null;
-  }
-  if(!semElegida||!semElegida.txs||!semElegida.txs.length){
-    toast('⚠️ No hay datos para el período seleccionado');
-    return;
-  }
-  var from=semElegida.from, to=semElegida.to;
-  var txsSem=semElegida.txs;
-
-  // Solo terminales activas QUE ADEMÁS tienen operaciones aprobadas en esta semana
+  var wr=weekRange();
   var activos=pdvs.filter(function(p){return p.estado==='activo';});
-  var conDatos=activos.filter(function(p){
-    return txsSem.some(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
-  });
-  if(!conDatos.length){
-    toast('⚠️ Ninguna terminal activa tiene operaciones en '+from+' al '+to);
-    return;
-  }
-
-  conDatos.forEach(function(p,i){
+  activos.forEach(function(p,i){
     setTimeout(function(){
-      var txsTerm=txsSem.filter(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
-      var cred=txsTerm.reduce(function(s,t){return s+(t.tipo==='credito'?t.monto:0);},0);
-      var deb=txsTerm.reduce(function(s,t){return s+(t.tipo==='debito'?t.monto:0);},0);
-      var qr=txsTerm.reduce(function(s,t){return s+(t.tipo==='qr'?t.monto:0);},0);
-      var v={cred:cred,deb:deb,qr:qr,real:true,txs:txsTerm};
-      var com=calcCom(p,v);
+      var v=calcTx(p);var com=calcCom(p,v);
       var num='LIQ-'+new Date().getFullYear()+'-'+String(pdvs.indexOf(p)+1).padStart(3,'0')+'-'+Math.floor(Math.random()*900+100);
-      buildPDF(p,v,from,to,num,com);
+      buildPDF(p,v,wr.from,wr.to,num,com);
     },i*700);
   });
-  toast('Generando '+conDatos.length+' PDFs para '+from+' al '+to+'...');
-}
-
-// ── LIQUIDAR POR GRUPO: PDFs individuales ──────────────────────────────
-// Genera un PDF por cada terminal del grupo que tenga operaciones
-function generateGroupPDFs(groupId){
-  var gruposArr=(typeof grupos!=='undefined'&&Array.isArray(grupos))?grupos:[];
-  var g=gruposArr.find(function(gg){return gg.id===groupId;});
-  if(!g){toast('Grupo no encontrado');return;}
-
-  var periodo=window._liqPeriodo||'actual';
-  var semsOrd=Object.values(historial).sort(function(a,b){return b.key.localeCompare(a.key);});
-  var semElegida=periodo==='actual'?(semsOrd[0]||null):(historial[periodo]||null);
-  if(!semElegida||!semElegida.txs||!semElegida.txs.length){
-    toast('⚠️ No hay datos para el período seleccionado');return;
-  }
-  var from=semElegida.from,to=semElegida.to,txsSem=semElegida.txs;
-
-  var pdvsGrupo=pdvs.filter(function(p){
-    return p.estado==='activo'
-      &&g.terminales.indexOf(p.terminal)>=0
-      &&txsSem.some(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
-  });
-  if(!pdvsGrupo.length){
-    toast('⚠️ Ninguna terminal del grupo '+g.nombre+' tiene operaciones en '+from+' al '+to);return;
-  }
-
-  pdvsGrupo.forEach(function(p,i){
-    setTimeout(function(){
-      var txsTerm=txsSem.filter(function(t){return t.terminal===p.terminal&&t.estado==='aprobada';});
-      var cred=txsTerm.reduce(function(s,t){return s+(t.tipo==='credito'?t.monto:0);},0);
-      var deb=txsTerm.reduce(function(s,t){return s+(t.tipo==='debito'?t.monto:0);},0);
-      var qr=txsTerm.reduce(function(s,t){return s+(t.tipo==='qr'?t.monto:0);},0);
-      var v={cred:cred,deb:deb,qr:qr,real:true,txs:txsTerm};
-      var com=calcCom(p,v);
-      var num='LIQ-'+new Date().getFullYear()+'-'+String(pdvs.indexOf(p)+1).padStart(3,'0')+'-'+Math.floor(Math.random()*900+100);
-      buildPDF(p,v,from,to,num,com);
-    },i*700);
-  });
-  toast('Generando '+pdvsGrupo.length+' PDFs del grupo '+g.nombre+' para '+from+' al '+to+'...');
-}
-
-// ── LIQUIDAR POR GRUPO: Resumen consolidado ────────────────────────────
-// Un solo PDF con los totales del grupo, para mandar al cliente (partner)
-// IMPORTANTE: solo muestra lo que PayNorth le cobra a las terminales.
-// NO muestra lo que Payway le cobra a PayNorth (costoPN).
-function generateGroupSummary(groupId){
-  var gruposArr=(typeof grupos!=='undefined'&&Array.isArray(grupos))?grupos:[];
-  var g=gruposArr.find(function(gg){return gg.id===groupId;});
-  if(!g){toast('Grupo no encontrado');return;}
-
-  var periodo=window._liqPeriodo||'actual';
-  var semsOrd=Object.values(historial).sort(function(a,b){return b.key.localeCompare(a.key);});
-  var semElegida=periodo==='actual'?(semsOrd[0]||null):(historial[periodo]||null);
-  if(!semElegida||!semElegida.txs||!semElegida.txs.length){
-    toast('⚠️ No hay datos para el período seleccionado');return;
-  }
-  var from=semElegida.from,to=semElegida.to,txsSem=semElegida.txs;
-
-  var filas=[];
-  var totCred=0,totDeb=0,totQr=0,totOps=0,totCom=0;
-  g.terminales.forEach(function(term){
-    var p=pdvs.find(function(pp){return pp.terminal===term;});
-    if(!p) return;
-    var txsT=txsSem.filter(function(t){return t.terminal===term&&t.estado==='aprobada';});
-    if(!txsT.length) return;
-    var cred=txsT.reduce(function(s,t){return s+(t.tipo==='credito'?t.monto:0);},0);
-    var deb=txsT.reduce(function(s,t){return s+(t.tipo==='debito'?t.monto:0);},0);
-    var qr=txsT.reduce(function(s,t){return s+(t.tipo==='qr'?t.monto:0);},0);
-    var total=cred+deb+qr;
-    var com=cred*(p.comCred||0)/100+deb*(p.comDeb||0)/100+qr*(p.comQr||0)/100;
-    filas.push({p:p,ops:txsT.length,cred:cred,deb:deb,qr:qr,total:total,com:com,entrega:total-com});
-    totCred+=cred;totDeb+=deb;totQr+=qr;totOps+=txsT.length;totCom+=com;
-  });
-  if(!filas.length){
-    toast('⚠️ Ninguna terminal del grupo '+g.nombre+' tiene operaciones en '+from+' al '+to);return;
-  }
-
-  var jsPDF=window.jspdf.jsPDF;
-  var doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
-  var W=210,pH=297;
-  var C={dark:[22,90,58],mid:[34,139,87],light:[236,248,241],accent:[52,197,119],
-    white:[255,255,255],gray:[248,249,248],line:[220,232,224],txt:[30,40,34],
-    muted:[120,145,130],red:[180,40,40]};
-  var now=new Date();
-  function fd(d){return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();}
-  var emision=fd(now);
-  function fv(val){return(val&&val>0)?'$'+val.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2}):'$ -';}
-
-  // Header (mismo estilo que buildPDF)
-  doc.setFillColor(C.dark[0],C.dark[1],C.dark[2]);doc.rect(0,0,8,pH,'F');
-  doc.setFillColor(C.mid[0],C.mid[1],C.mid[2]);doc.circle(24,18,10,'F');
-  doc.setTextColor(255,255,255);doc.setFontSize(8.5);doc.setFont('helvetica','bold');
-  doc.text('Pay',24,15.5,{align:'center'});doc.setFontSize(6.5);doc.setFont('helvetica','normal');
-  doc.text('North',24,20,{align:'center'});
-  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(17);doc.setFont('helvetica','bold');
-  doc.text('PayNorth',38,16);doc.setFontSize(7.5);doc.setFont('helvetica','normal');
-  doc.setTextColor(C.muted[0],C.muted[1],C.muted[2]);doc.text('Soluciones de pago',38,21.5);
-  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(11);doc.setFont('helvetica','bold');
-  doc.text('RESUMEN DE GRUPO',W-12,12,{align:'right'});
-  doc.setFontSize(7.5);doc.setFont('helvetica','normal');doc.setTextColor(C.muted[0],C.muted[1],C.muted[2]);
-  doc.text('Periodo: '+from+' al '+to,W-12,17,{align:'right'});
-  doc.text('Emision: '+emision,W-12,22,{align:'right'});
-  doc.setDrawColor(C.accent[0],C.accent[1],C.accent[2]);doc.setLineWidth(1);doc.line(12,32,W-12,32);
-
-  // Banner con nombre del grupo
-  var y=36;
-  doc.setFillColor(C.light[0],C.light[1],C.light[2]);doc.roundedRect(12,y,W-24,18,3,3,'F');
-  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(14);doc.setFont('helvetica','bold');
-  doc.text('Grupo: '+g.nombre,18,y+9);
-  doc.setFontSize(8);doc.setFont('helvetica','normal');doc.setTextColor(C.muted[0],C.muted[1],C.muted[2]);
-  doc.text(filas.length+' terminales con operaciones  -  '+totOps+' operaciones aprobadas',18,y+14.5);
-  y=60;
-
-  // Tabla 1: Volumen por terminal
-  var rowsVol=filas.map(function(f){
-    return[f.p.terminal,(f.p.nombre||'-'),String(f.ops),fv(f.cred),fv(f.deb),fv(f.qr),fv(f.total)];
-  });
-  rowsVol.push(['','TOTAL',String(totOps),fv(totCred),fv(totDeb),fv(totQr),fv(totCred+totDeb+totQr)]);
-
-  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(8);doc.setFont('helvetica','bold');
-  doc.text('VOLUMEN POR TERMINAL',12,y);
-  doc.setLineWidth(0.4);doc.setDrawColor(C.accent[0],C.accent[1],C.accent[2]);
-  doc.line(12,y+1.5,W-12,y+1.5);y+=3;
-  doc.autoTable({
-    startY:y,margin:{left:12,right:12},tableWidth:186,
-    head:[['Terminal','Nombre','Ops','Credito','Debito','QR','Total']],
-    body:rowsVol,
-    headStyles:{fillColor:C.dark,textColor:C.white,fontSize:7,fontStyle:'bold',halign:'center'},
-    bodyStyles:{fontSize:7.5,textColor:C.txt,cellPadding:2,halign:'right'},
-    columnStyles:{0:{halign:'left',cellWidth:20},1:{halign:'left',cellWidth:42},2:{halign:'center',cellWidth:14},3:{cellWidth:26},4:{cellWidth:26},5:{cellWidth:26},6:{cellWidth:32}},
-    alternateRowStyles:{fillColor:C.gray},
-    tableLineColor:C.line,tableLineWidth:0.2,
-    didParseCell:function(data){
-      if(data.row.index===rowsVol.length-1){
-        data.cell.styles.fontStyle='bold';
-        data.cell.styles.fillColor=C.light;
-        data.cell.styles.textColor=C.dark;
-      }
-    }
-  });
-  y=doc.lastAutoTable.finalY+6;
-
-  // Tabla 2: Comisión y monto a entregar por terminal
-  var rowsCom=filas.map(function(f){
-    return[f.p.terminal,(f.p.nombre||'-'),fv(f.total),fv(f.com),fv(f.entrega)];
-  });
-  rowsCom.push(['','TOTAL',fv(totCred+totDeb+totQr),fv(totCom),fv((totCred+totDeb+totQr)-totCom)]);
-
-  doc.setTextColor(C.dark[0],C.dark[1],C.dark[2]);doc.setFontSize(8);doc.setFont('helvetica','bold');
-  doc.text('COMISION Y MONTO A ENTREGAR POR TERMINAL',12,y);
-  doc.line(12,y+1.5,W-12,y+1.5);y+=3;
-  doc.autoTable({
-    startY:y,margin:{left:12,right:12},tableWidth:186,
-    head:[['Terminal','Nombre','Volumen','Comision','A entregar']],
-    body:rowsCom,
-    headStyles:{fillColor:C.dark,textColor:C.white,fontSize:7,fontStyle:'bold',halign:'center'},
-    bodyStyles:{fontSize:7.5,textColor:C.txt,cellPadding:2,halign:'right'},
-    columnStyles:{0:{halign:'left',cellWidth:22},1:{halign:'left',cellWidth:60},2:{cellWidth:36},3:{cellWidth:34},4:{cellWidth:34}},
-    alternateRowStyles:{fillColor:C.gray},
-    tableLineColor:C.line,tableLineWidth:0.2,
-    didParseCell:function(data){
-      if(data.row.index===rowsCom.length-1){
-        data.cell.styles.fontStyle='bold';
-        data.cell.styles.fillColor=C.light;
-        data.cell.styles.textColor=C.dark;
-      }
-    }
-  });
-  y=doc.lastAutoTable.finalY+8;
-
-  // Resumen final
-  var volTotal=totCred+totDeb+totQr;
-  var aEntregar=volTotal-totCom;
-  doc.autoTable({
-    startY:y,margin:{left:100,right:12},
-    body:[['Volumen total',fv(volTotal)],['Comision PayNorth','-'+fv(totCom)],['TOTAL A ENTREGAR',fv(aEntregar)]],
-    bodyStyles:{fontSize:9,textColor:C.txt,cellPadding:3},
-    columnStyles:{0:{halign:'left',cellWidth:60},1:{halign:'right',cellWidth:35}},
-    tableLineColor:C.line,tableLineWidth:0.3,
-    didParseCell:function(data){
-      if(data.row.index===2){data.cell.styles.fontStyle='bold';data.cell.styles.fontSize=11;data.cell.styles.fillColor=C.dark;data.cell.styles.textColor=C.white;}
-      if(data.row.index===1){data.cell.styles.textColor=C.red;}
-    }
-  });
-
-  // Footer
-  doc.setFillColor(C.dark[0],C.dark[1],C.dark[2]);doc.rect(0,pH-12,W,12,'F');
-  doc.setTextColor(C.accent[0],C.accent[1],C.accent[2]);doc.setFontSize(7);doc.setFont('helvetica','normal');
-  doc.text('PayNorth  |  Resumen de grupo '+g.nombre+'  |  '+from+' al '+to+'  |  Emitido el '+emision,W/2,pH-5,{align:'center'});
-
-  doc.save('PayNorth_Grupo_'+g.nombre.replace(/\s+/g,'_')+'_'+from.replace(/\//g,'-')+'.pdf');
-  toast('📊 Resumen generado: '+g.nombre);
+  toast('Generando '+activos.length+' PDFs...');
 }
 
 function buildPDF(p,v,from,to,num,com){
@@ -2865,7 +2527,7 @@ function buildPDF(p,v,from,to,num,com){
   function fd(d){return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();}
   var emision=fd(now);
   var MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
-  function fv(val){return(val&&val>0)?'$'+val.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2}):'$ -';}
+  function fv(val){return(val&&val>0)?'$'+Math.round(val).toLocaleString('es-AR'):'$ -';}
 
   // Header
   doc.setFillColor(C.dark[0],C.dark[1],C.dark[2]);doc.rect(0,0,8,pH,'F');
@@ -3507,11 +3169,10 @@ function renderGuardar(){
       html+='<td style="text-align:center"><strong>'+h.txCount+'</strong></td>';
       html+='<td>'+fmt(h.vol)+'</td>';
       html+='<td style="color:var(--gd);font-weight:500">'+fmt(h.com)+'</td>';
-      html+='<td onclick="event.stopPropagation()"><div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;align-items:center">';
+      html+='<td onclick="event.stopPropagation()">';
       if(!esActiva) html+='<button class="bsm pdf" onclick="seleccionarSemanaActiva(\''+h.key+'\')">📌 Seleccionar</button>';
       else html+='<span style="font-size:11px;color:var(--amb);font-weight:600">✓ Seleccionada</span>';
-      html+='<button class="bsm" title="Cargar operaciones en memoria para agregar más" onclick="cargarSemanaEnMemoria(\''+h.key+'\')">+ Agregar más</button>';
-      html+='</div></td>';
+      html+='</td>';
       html+='</tr>';
     });
     html+='</tbody></table></div>';
@@ -3599,21 +3260,11 @@ function sortTxsByFecha(txs){
 function acumularEnSemanaExistente(key){
   var h=historial[key];
   if(!h){toast('Semana no encontrada');return;}
-  // Cancelar ventas que fueron devueltas en el mismo batch
-  var cancelRes=cancelarDevueltasConSuVenta(transactions);
-  var txsLimpias=cancelRes.txs;
-  var paresCanceladas=cancelRes.canceladas;
-  // Filtrar solo APROBADAS — las rechazadas/anuladas/pendientes no se liquidan
-  var aprobadas=txsLimpias.filter(function(t){return t.estado==='aprobada';});
-  var descartadas=transactions.length-aprobadas.length-paresCanceladas*2;
   // Dedup global contra TODO el historial (excluyendo esta semana que ya conoce sus propias txs)
-  var nuevas=filtrarNuevasContraHistorial(aprobadas, key);
-  var dupCount=aprobadas.length-nuevas.length;
+  var nuevas=filtrarNuevasContraHistorial(transactions, key);
+  var dupCount=transactions.length-nuevas.length;
   if(!nuevas.length){
-    var msg='Nada nuevo para agregar';
-    if(descartadas>0) msg+=' · '+descartadas+' no aprobadas descartadas';
-    if(dupCount>0) msg+=' · '+dupCount+' duplicadas ignoradas';
-    toast(msg);
+    toast('No hay operaciones nuevas — '+dupCount+' duplicadas eliminadas');
     return;
   }
   h.txs=sortTxsByFecha(h.txs.concat(nuevas));
@@ -3632,7 +3283,7 @@ function acumularEnSemanaExistente(key){
   h.savedAt=new Date().toISOString();
   saveHistorial();
   dbSaveHistorialWeek(h);
-  toast('✅ '+nuevas.length+' aprobadas agregadas'+(paresCanceladas>0?' · '+paresCanceladas+' venta'+(paresCanceladas>1?'s':'')+' cancelada'+(paresCanceladas>1?'s':'')+' con su devolución':'')+(descartadas>0?' · '+descartadas+' no aprobadas descartadas':'')+(dupCount>0?' · '+dupCount+' duplicadas ignoradas':'')+' — total: '+h.txCount);
+  toast('✅ '+nuevas.length+' operaciones agregadas'+(dupCount>0?' · '+dupCount+' duplicadas ignoradas':'')+' — total: '+h.txCount);
   navigate('guardar');
 }
 
@@ -3703,6 +3354,8 @@ function openModal(idx){
   document.getElementById('fdeb').value=p.comDeb||'';
   document.getElementById('fqr').value=p.comQr||'';
   document.getElementById('fprop').value=p.comProp||'';
+  document.getElementById('fpropmodo').value=p.propModo||'mismo';
+  onPropModoChange();
   document.getElementById('fvol').value=p.volMensual||'';
   document.getElementById('modal-pdv').classList.add('open');
 }
@@ -3724,6 +3377,7 @@ function savePDV(){
     comDeb:parseFloat(document.getElementById('fdeb').value)||0,
     comQr:parseFloat(document.getElementById('fqr').value)||0,
     comProp:parseFloat(document.getElementById('fprop').value)||0,
+    propModo:(document.getElementById('fpropmodo')||{value:'mismo'}).value,
     volMensual:parseFloat(document.getElementById('fvol').value)||0,
   };
   if(!pdv.terminal||!pdv.nombre){toast('Terminal y nombre son obligatorios');return;}
@@ -3752,20 +3406,9 @@ function toast(msg){
   setTimeout(function(){t.classList.remove('show');},3500);
 }
 
-// ── Cierre por click afuera ──
-// modal-pdv: NO cierra por click afuera (tiene form con muchos campos, evita perder datos)
-//   → solo cierra con los botones Cancelar o Guardar
-// Los demás: cierran por click afuera PERO con chequeo de mousedown
-//   → si arrancás el drag adentro y soltás afuera, NO cierra (protege selección de texto)
-['modal-liq','modal-grupos','modal-asignar'].forEach(function(id){
+['modal-pdv','modal-liq','modal-grupos','modal-asignar'].forEach(function(id){
   var el=document.getElementById(id);
-  if(!el) return;
-  var mousedownOnOverlay=false;
-  el.addEventListener('mousedown',function(e){ mousedownOnOverlay=(e.target===this); });
-  el.addEventListener('click',function(e){
-    if(e.target===this && mousedownOnOverlay) closeModal(id);
-    mousedownOnOverlay=false;
-  });
+  if(el) el.addEventListener('click',function(e){if(e.target===this)closeModal(id);});
 });
 
 function renderBalance(){
@@ -3823,7 +3466,7 @@ function renderBalance(){
   var cobPropinas=apr.reduce(function(s,t){
     if(!(t.propina>0)) return s;
     var pdv=pdvs.find(function(p){return p.terminal===t.terminal;});
-    return s+(t.propina*(pdv&&pdv.comProp>0?pdv.comProp:0)/100);
+    return s+comPropinaDe(t,pdv);
   },0);
 
   var cobC=0,cobD=0,cobQ=0;
@@ -4562,7 +4205,7 @@ function renderConciliacion(){
     if(t.tipo==='credito') totComCred+=t.monto*pdv.comCred/100;
     else if(t.tipo==='debito') totComDeb+=t.monto*pdv.comDeb/100;
     else totComQr+=t.monto*pdv.comQr/100;
-    if(t.propina>0) totComProp+=t.propina*(pdv.comProp||0)/100;
+    if(t.propina>0) totComProp+=comPropinaDe(t,pdv);
   });
   var totCom=totComCred+totComDeb+totComQr;
   var totNetoPropinas=totPropinas-totComProp;
@@ -4583,7 +4226,7 @@ function renderConciliacion(){
     if(t.tipo==='credito'){r.cred+=t.monto;r.comCred+=t.monto*(pdv?pdv.comCred:0)/100;}
     else if(t.tipo==='debito'){r.deb+=t.monto;r.comDeb+=t.monto*(pdv?pdv.comDeb:0)/100;}
     else {r.qr+=t.monto;r.comQr+=t.monto*(pdv?pdv.comQr:0)/100;}
-    if(t.propina>0){r.propinas+=t.propina;r.comPropinas+=t.propina*(pdv&&pdv.comProp?pdv.comProp:0)/100;}
+    if(t.propina>0){r.propinas+=t.propina;r.comPropinas+=comPropinaDe(t,pdv);}
   });
 
   var html='<div class="ph"><h2>Ventas</h2><p>Volumen de ventas y lo que tenés que entregar a cada terminal</p></div>';
@@ -4935,7 +4578,7 @@ function renderCaja(){
     if(!deudaTerminal[t.terminal]) deudaTerminal[t.terminal]={nombre:pdv.nombre,deuda:0};
     var com=t.tipo==='credito'?pdv.comCred:t.tipo==='debito'?pdv.comDeb:pdv.comQr;
     var prop=t.propina||0;
-    var comProp=prop*(pdv.comProp||0)/100;
+    var comProp=comPropinaDe(t,pdv);
     deudaTerminal[t.terminal].deuda+=(t.monto-t.monto*com/100)+(prop-comProp);
   });
 
@@ -6061,202 +5704,6 @@ function renderSocios(){
   return html;
 }
 
-
-
-// ═══════════ SISTEMA DE PREVIEW POR ROL ═══════════
-window._previewCtx = null; window._previewOriginal = null;
-window.ITEMS_POR_ROL = {admin:null, socio:["dashboard","puntos","liquidaciones","historial"], pdv:["dashboard","puntos","liquidaciones","historial"]};
-window.effectiveRole = function(){ return window._previewCtx ? window._previewCtx.tipo : role; };
-window.filtrarMenuPorRol = function(){
-  var items = window.ITEMS_POR_ROL[window.effectiveRole()];
-  document.querySelectorAll(".ni").forEach(function(el){
-    if(!items){ el.style.display=""; return; }
-    var oc = el.getAttribute("onclick")||""; var m = oc.match(/navigate\('([^']+)'\)/);
-    if(!m){ el.style.display=""; return; }
-    el.style.display = items.indexOf(m[1])>=0 ? "" : "none";
-  });
-};
-window.mostrarBannerPreview = function(){
-  var existing = document.getElementById("preview-banner"); if(existing) existing.remove();
-  var ctx = window._previewCtx; if(!ctx) return;
-  var b = document.createElement("div"); b.id = "preview-banner";
-  b.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:linear-gradient(90deg,#f59e0b,#ea580c);color:white;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;font-family:inherit;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.15)";
-  b.innerHTML = '<span>🔍 Modo preview — Viendo como <strong style="text-transform:uppercase">'+(ctx.tipo==="socio"?"socio":"pdv")+'</strong> · <span style="background:rgba(255,255,255,.25);padding:3px 10px;border-radius:12px;margin-left:6px">'+ctx.nombre+'</span></span><button onclick="exitPreview()" style="background:rgba(255,255,255,.25);color:white;border:1px solid rgba(255,255,255,.5);padding:6px 14px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600">← Volver a vista admin</button>';
-  document.body.insertBefore(b, document.body.firstChild);
-  document.body.style.paddingTop = "44px";
-};
-window.ocultarBannerPreview = function(){ var b=document.getElementById("preview-banner"); if(b) b.remove(); document.body.style.paddingTop=""; };
-window.aplicarRefinamientosPorRol = function(){
-  var er = window.effectiveRole(); if(er === "admin") return;
-  var ocultarColumna = function(labs){
-    document.querySelectorAll("table").forEach(function(table){
-      var firstRow = table.querySelector("thead tr") || table.querySelector("tr"); if(!firstRow) return;
-      for(var i=0;i<firstRow.children.length;i++){
-        var tC = firstRow.children[i].textContent.trim().toUpperCase().replace(/[^\w\s.ÁÉÍÓÚÑ/]/g,"").replace(/\s+/g," ").trim();
-        if(labs.some(function(l){return tC.indexOf(l)>=0;})){
-          var idx = i;
-          table.querySelectorAll("tr").forEach(function(tr){ if(tr.children[idx]) tr.children[idx].style.display="none"; });
-        }
-      }
-    });
-  };
-  var labSocio = ["COBRADO A CLIENTES","NETO PAYNORTH","TOTAL COMISIONES","COSTO PAYWAY","COMISIONES","NETO"];
-  var labPdv = ["COBRADO A CLIENTES","NETO PAYNORTH","COMISIONES","NETO"];
-  var lab = er==="socio" ? labSocio : labPdv;
-  document.querySelectorAll(".sc").forEach(function(c){
-    var t = c.textContent.toUpperCase();
-    lab.forEach(function(l){ if(t.indexOf(l)===0||new RegExp("^"+l+"\\b").test(t)) c.style.display="none"; });
-  });
-  if(er==="pdv"){
-    document.querySelectorAll(".sc").forEach(function(c){
-      if(c.textContent.toUpperCase().indexOf("PDV ACTIVOS")>=0) c.style.display="none";
-    });
-  }
-  document.querySelectorAll("input[placeholder*=\"Buscar\" i]").forEach(function(inp){
-    if(er==="pdv") inp.style.display="none";
-    else inp.placeholder = "Buscar por terminal...";
-  });
-  document.querySelectorAll("select").forEach(function(sel){
-    var hE = Array.from(sel.options).some(function(o){return /estado/i.test(o.text);});
-    var hG = Array.from(sel.options).some(function(o){return /grupo/i.test(o.text);});
-    if(hE||hG) sel.style.display="none";
-  });
-  document.querySelectorAll("button, div[onclick], [class*=tab]").forEach(function(el){
-    var t = el.textContent.trim();
-    if(el.id==="btn-abrir-preview"||(el.closest&&el.closest("#preview-banner"))) return;
-    if(t==="Por grupos"||/Por grupos$/.test(t)||/Gestionar grupos/.test(t)) el.style.display="none";
-  });
-  var colsOc = {socio:["DIRECCIÓN","GRUPO","ESTADO","ACCIONES","CRÉD","DÉB","QR","PROPINA","CBU","ALIAS"], pdv:["DIRECCIÓN","GRUPO","ESTADO","ACCIONES","CBU","ALIAS"]};
-  ocultarColumna(colsOc[er]||[]);
-  document.querySelectorAll("[style*=\"position: fixed\"], .fab").forEach(function(el){
-    if(el.id==="preview-banner"||el.id==="btn-abrir-preview") return;
-    var t = el.textContent.trim(); if(t==="+"||t.length<=2) el.style.display="none";
-  });
-  document.querySelectorAll(".ctitle, h2, h3, h4").forEach(function(h){
-    if(/Liquidar por grupo/i.test(h.textContent)){ var c = h.closest(".card"); if(c) c.style.display="none"; }
-  });
-  document.querySelectorAll("button").forEach(function(b){
-    if(/Generar todas/i.test(b.textContent)) b.style.display="none";
-  });
-  if(er==="socio"){
-    ocultarColumna(["A COBRAR","COM CRÉD","COM DÉB","COM QR","COM PROP"]);
-    document.querySelectorAll("div, span").forEach(function(el){
-      if(el.children.length>2) return;
-      var t = el.textContent.trim().toUpperCase();
-      if(/^A\s*COBRAR\b/i.test(t)&&/\$[\d.,\-]+/.test(t)&&t.length<60) el.style.display="none";
-    });
-  }
-  document.querySelectorAll("div, span, td, th").forEach(function(el){
-    if(el.children.length>2) return;
-    var t = el.textContent.trim().toUpperCase();
-    if(/^(COMISIÓN|COMISIONES|NETO|NETO TOTAL)\b/.test(t)&&/\$[\d.,\-]+/.test(t)&&t.length<60) el.style.display="none";
-  });
-  document.querySelectorAll("button").forEach(function(b){
-    var t = b.textContent.trim();
-    if(/^\+\s*Ops$/.test(t) || /^Limpiar todo$/i.test(t) || t === "×" || t === "✕" || t === "x"){
-      b.style.display = "none";
-    }
-  });
-  document.querySelectorAll(".ctitle").forEach(function(h){
-    if(!/Estado PDV/i.test(h.textContent)) return;
-    var card = h.closest(".card"); if(!card) return;
-    card.querySelectorAll("*").forEach(function(el){
-      if(el.children.length !== 0) return;
-      var t = el.textContent.trim();
-      if(!t || /^activo$|^inactivo$/i.test(t) || /Estado PDV/i.test(t)) return;
-      if(/^\d{6,10}$/.test(t)) return;
-      var font = window.getComputedStyle(el).fontSize;
-      if(parseFloat(font) <= 11.5){ el.style.display = "none"; }
-    });
-  });
-  if(er === "socio"){
-    document.querySelectorAll("button").forEach(function(b){
-      var t = b.textContent.trim();
-      if(/^\s*(📄|📃)?\s*PDF\s*$/i.test(t) || t === "PDF"){
-        b.style.display = "none";
-      }
-    });
-  }
-};
-window.enterPreview = function(ctx){
-  window._previewOriginal = {pdvs:pdvs.slice(), historial:historial, transactions:transactions.slice()};
-  window._previewCtx = ctx;
-  var terms = [];
-  if(ctx.tipo==="socio"&&ctx.grupoIds){
-    ctx.grupoIds.forEach(function(gid){ var g=grupos.find(function(x){return x.id===gid;}); if(g) terms=terms.concat(g.terminales); });
-  } else if(ctx.tipo==="pdv"&&ctx.terminal){ terms = [ctx.terminal]; }
-  window.pdvs = window._previewOriginal.pdvs.filter(function(p){return terms.indexOf(p.terminal)>=0;});
-  window.transactions = window._previewOriginal.transactions.filter(function(t){return terms.indexOf(t.terminal)>=0;});
-  var nh={};
-  Object.keys(window._previewOriginal.historial).forEach(function(k){
-    var h=window._previewOriginal.historial[k]; var o={}; for(var kk in h){o[kk]=h[kk];}
-    o.txs = h.txs.filter(function(t){return terms.indexOf(t.terminal)>=0;});
-    o.vol = o.txs.reduce(function(s,t){return s+t.monto;},0);
-    o.txCount = o.txs.length; nh[k] = o;
-  });
-  window.historial = nh;
-  window.mostrarBannerPreview(); window.filtrarMenuPorRol();
-  navigate("dashboard");
-};
-window.exitPreview = function(){
-  if(!window._previewOriginal) return;
-  window.pdvs = window._previewOriginal.pdvs;
-  window.historial = window._previewOriginal.historial;
-  window.transactions = window._previewOriginal.transactions;
-  window._previewCtx = null; window._previewOriginal = null;
-  window.ocultarBannerPreview();
-  document.querySelectorAll(".ni").forEach(function(el){el.style.display="";});
-  navigate("usuarios");
-};
-(function(){
-  if(window._navHooked) return;
-  var _origNav = window.navigate;
-  window.navigate = function(v){
-    if(window._previewCtx){ var _m=document.querySelector(".main"); if(_m) _m.style.visibility="hidden"; }
-    var r = _origNav.apply(this, arguments);
-    if(window._previewCtx){
-      setTimeout(function(){
-        window.mostrarBannerPreview(); window.filtrarMenuPorRol(); window.aplicarRefinamientosPorRol();
-        var _m=document.querySelector(".main"); if(_m) _m.style.visibility="visible";
-      }, 50);
-    }
-    if(v==="usuarios" && !window._previewCtx){
-      setTimeout(function(){ window.inyectarBotonPreview && window.inyectarBotonPreview(); }, 100);
-    }
-    return r;
-  };
-  window._navHooked = true;
-})();
-window.inyectarBotonPreview = function(){
-  if(document.getElementById("btn-abrir-preview")) return;
-  var h = Array.from(document.querySelectorAll("h2,h1,.ctitle")).find(function(e){return e.textContent.trim()==="Usuarios";});
-  if(!h) return;
-  var btn = document.createElement("button"); btn.id = "btn-abrir-preview";
-  btn.textContent = "🔍 Probar preview (ver como...)";
-  btn.style.cssText = "position:fixed;top:16px;right:24px;z-index:9999;background:linear-gradient(90deg,#f59e0b,#ea580c);color:white;border:none;padding:10px 18px;border-radius:10px;cursor:pointer;font-family:inherit;font-weight:600;font-size:13px;box-shadow:0 4px 12px rgba(245,158,11,.35)";
-  btn.onclick = function(){ window.abrirModalPreview(); };
-  document.body.appendChild(btn);
-};
-window.abrirModalPreview = function(){
-  var existing = document.getElementById("modal-preview"); if(existing) existing.remove();
-  var gruposOpts = grupos.map(function(g){ return '<option value="socio|'+g.id+'|'+g.nombre+'">SOCIO · '+g.nombre+' ('+g.terminales.length+' terminales)</option>'; }).join("");
-  var pdvAct = pdvs.filter(function(p){return p.estado==="activo";}).slice(0,50);
-  var pdvOpts = pdvAct.map(function(p){ return '<option value="pdv|'+p.terminal+'|'+(p.nombre||"(sin nombre)")+'">PDV · '+p.terminal+' – '+(p.nombre||"(sin nombre)")+'</option>'; }).join("");
-  var m = document.createElement("div"); m.id = "modal-preview";
-  m.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:inherit";
-  m.innerHTML = '<div style="background:white;border-radius:14px;padding:28px;width:520px;max-width:90vw;box-shadow:0 10px 30px rgba(0,0,0,.3)"><h3 style="margin:0 0 8px 0;font-size:18px;color:#111">🔍 Vista previa como usuario</h3><p style="margin:0 0 20px 0;color:#666;font-size:13px">Elegí un socio o punto de venta para ver cómo se vería la página para ese usuario. Los datos quedan filtrados y las cifras privadas se ocultan.</p><label style="display:block;font-size:12px;font-weight:600;color:#333;margin-bottom:6px;text-transform:uppercase">Ver como</label><select id="preview-selector" style="width:100%;padding:10px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:14px;font-family:inherit;margin-bottom:20px"><option value="">— Elegí un usuario —</option><optgroup label="Socios (ven todas las terminales del grupo)">'+gruposOpts+'</optgroup><optgroup label="PDVs (ven solo una terminal)">'+pdvOpts+'</optgroup></select><div style="display:flex;gap:10px;justify-content:flex-end"><button onclick="document.getElementById(\'modal-preview\').remove()" style="padding:10px 18px;border:1.5px solid #ddd;background:white;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:600">Cancelar</button><button onclick="window.confirmarPreview()" style="padding:10px 18px;border:none;background:#1a7a4a;color:white;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:600">Ver vista previa →</button></div></div>';
-  document.body.appendChild(m);
-};
-window.confirmarPreview = function(){
-  var sel = document.getElementById("preview-selector");
-  if(!sel || !sel.value){ alert("Elegí un usuario primero"); return; }
-  var parts = sel.value.split("|"); var tipo = parts[0], id = parts[1], nombre = parts[2];
-  var m = document.getElementById("modal-preview"); if(m) m.remove();
-  if(tipo==="socio") enterPreview({tipo:"socio", grupoIds:[id], nombre:nombre});
-  else enterPreview({tipo:"pdv", terminal:id, nombre:nombre});
-};
-setTimeout(function(){ if(typeof role!=="undefined" && role==="admin") window.inyectarBotonPreview && window.inyectarBotonPreview(); }, 1500);
-// ═══════════ FIN SISTEMA DE PREVIEW ═══════════
 </script>
 </body>
 </html>
