@@ -3019,7 +3019,7 @@ function buildTxTableAcc(txs, bid, page){
 
   var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:6px">';
   html+='<div style="font-size:12px;color:var(--t3)">Mostrando <strong>'+((page-1)*perPage+1)+'</strong>–<strong>'+Math.min(page*perPage,txs.length)+'</strong> de <strong>'+txs.length+'</strong> operaciones</div>';
-  if(total>1) html+=buildPager(bid,page,total);
+  if(total>1) html+=buildPagerAcc(bid,page,total);
   html+='</div>';
 
   html+='<div style="overflow-x:auto;border:1px solid var(--b);border-radius:10px">';
@@ -3050,8 +3050,45 @@ function buildTxTableAcc(txs, bid, page){
       +'</tr>';
   });
   html+='</tbody></table></div>';
-  if(total>1) html+='<div style="display:flex;justify-content:center;padding:12px 0 0">'+buildPager(bid,page,total)+'</div>';
+  if(total>1) html+='<div style="display:flex;justify-content:center;padding:12px 0 0">'+buildPagerAcc(bid,page,total)+'</div>';
   return html;
+}
+
+function buildPagerAcc(bid,cur,total){
+  var s='<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap">';
+  function btn(p,label,disabled,active){
+    var style='padding:4px 9px;border-radius:6px;font-size:12px;font-family:inherit;cursor:'+(disabled||active?'default':'pointer')+';';
+    if(active) style+='border:1px solid var(--g);background:var(--g);color:#fff;font-weight:600;';
+    else if(disabled) style+='border:1px solid var(--b);background:var(--s2);color:var(--t3);';
+    else style+='border:1px solid var(--b);background:#fff;color:var(--t);';
+    var click=(!disabled&&!active)?'onclick="goTxPageAcc(\''+bid+'\','+p+')"':'';
+    return'<button '+click+' style="'+style+'">'+label+'</button>';
+  }
+  s+=btn(cur-1,'&#8249;',cur<=1,false);
+  var pages=[];
+  if(total<=7){for(var i=1;i<=total;i++)pages.push(i);}
+  else{
+    pages.push(1);
+    if(cur>3)pages.push('...');
+    for(var i=Math.max(2,cur-1);i<=Math.min(total-1,cur+1);i++)pages.push(i);
+    if(cur<total-2)pages.push('...');
+    pages.push(total);
+  }
+  pages.forEach(function(p){
+    if(p==='...') s+='<span style="padding:4px 5px;font-size:12px;color:var(--t3)">…</span>';
+    else s+=btn(p,p,false,p===cur);
+  });
+  s+=btn(cur+1,'&#8250;',cur>=total,false);
+  s+='</div>';
+  return s;
+}
+
+function goTxPageAcc(bid,page){
+  var st=_txPager[bid];
+  if(!st) return;
+  var tbl=document.getElementById(bid+'-table');
+  if(!tbl) return;
+  tbl.innerHTML=buildTxTableAcc(st.txs,bid,page);
 }
 
 function filterHistTxsAcc(bid, q, hi){
