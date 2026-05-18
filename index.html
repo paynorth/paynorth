@@ -3035,6 +3035,109 @@ function eliminarOpDelHistorial(semKey, txIdentifier){
   });
 }
 
+
+// ── Selección múltiple en tabla del historial ────────────────────────────────
+function onTxCheckChange(bid){
+  var checked=document.querySelectorAll('.cb-tx-'+bid+':checked').length;
+  var total=document.querySelectorAll('.cb-tx-'+bid).length;
+  var bar=document.getElementById('bulk-bar-'+bid);
+  var count=document.getElementById('bulk-count-'+bid);
+  var cbAll=document.getElementById('cb-all-'+bid);
+  if(count) count.textContent=checked;
+  if(bar) bar.style.display=checked>0?'flex':'none';
+  if(cbAll){
+    cbAll.checked=checked===total&&total>0;
+    cbAll.indeterminate=checked>0&&checked<total;
+  }
+}
+
+function toggleSelectAllAcc(bid,checked){
+  document.querySelectorAll('.cb-tx-'+bid).forEach(function(cb){cb.checked=checked;});
+  onTxCheckChange(bid);
+}
+
+function deseleccionarTodasAcc(bid){
+  document.querySelectorAll('.cb-tx-'+bid).forEach(function(cb){cb.checked=false;});
+  var cbAll=document.getElementById('cb-all-'+bid);
+  if(cbAll){cbAll.checked=false;cbAll.indeterminate=false;}
+  onTxCheckChange(bid);
+}
+
+function eliminarSeleccionadasAcc(bid){
+  var semKey=window._histKeys&&window._histKeys[bid]?window._histKeys[bid]:null;
+  if(!semKey) return;
+  var h=historial[semKey];
+  if(!h||!h.txs) return;
+
+  var checks=document.querySelectorAll('.cb-tx-'+bid+':checked');
+  if(!checks.length) return;
+
+  var idents=[];
+  checks.forEach(function(cb){idents.push(cb.getAttribute('data-ident'));});
+
+  // Resolver índices reales en h.txs
+  var indicesToDelete=[];
+  var totalMonto=0;
+  idents.forEach(function(ident){
+    var idx=-1;
+    if(ident.charAt(0)!=='#'){
+      idx=h.txs.findIndex(function(t,i){return t.nroCupon===ident&&indicesToDelete.indexOf(i)<0;});
+    } else {
+      idx=parseInt(ident.substring(1));
+    }
+    if(idx>=0&&idx<h.txs.length){
+      indicesToDelete.push(idx);
+      totalMonto+=h.txs[idx].monto||0;
+    }
+  });
+  if(!indicesToDelete.length){toast('No se encontraron las operaciones');return;}
+
+  var currentPage=_txPager[bid]?_txPager[bid].page:1;
+
+  mostrarModalConfirm({
+    title:'Eliminar '+indicesToDelete.length+' operaciones',
+    icon:'✕',
+    iconColor:'var(--red)',
+    body:
+      '<div style="background:var(--gp);border-radius:10px;padding:14px 16px;margin-top:6px;font-size:13px;line-height:1.7">'
+      +'<div style="display:flex;justify-content:space-between"><span style="color:var(--t3)">Operaciones a eliminar</span><strong>'+indicesToDelete.length+'</strong></div>'
+      +'<div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--b);margin-top:8px"><span style="color:var(--t3)">Monto total</span><strong style="color:var(--red);font-size:15px">$'+totalMonto.toLocaleString('es-AR')+'</strong></div>'
+      +'</div>'
+      +'<div style="color:var(--t3);font-size:12px;margin-top:12px;text-align:center">Esta acción no se puede deshacer</div>',
+    confirmText:'Eliminar todas',
+    confirmStyle:'background:var(--red);color:#fff',
+    onConfirm:function(){
+      // Eliminar en orden descendente para no descalibrar los índices
+      indicesToDelete.sort(function(a,b){return b-a;}).forEach(function(idx){
+        h.txs.splice(idx,1);
+      });
+      // Recalcular
+      var allApr=h.txs.filter(function(x){return x.estado==='aprobada';});
+      h.vol=allApr.reduce(function(s,x){return s+x.monto;},0);
+      h.com=allApr.reduce(function(s,x){
+        var pdv=pdvs.find(function(p){return p.terminal===x.terminal;});
+        if(!pdv) return s;
+        return s+(x.monto*(x.tipo==='credito'?pdv.comCred:x.tipo==='debito'?pdv.comDeb:pdv.comQr)/100);
+      },0);
+      h.costo=allApr.reduce(function(s,x){
+        return s+(x.monto*(x.tipo==='credito'?costoPN.cred:x.tipo==='debito'?costoPN.deb:costoPN.qr)/100);
+      },0);
+      h.txCount=h.txs.length;
+      h.savedAt=new Date().toISOString();
+      saveHistorial();
+      dbSaveHistorialWeek(h);
+      toast(indicesToDelete.length+' operaciones eliminadas');
+
+      // Refrescar la tabla manteniendo página
+      var tbl=document.getElementById(bid+'-table');
+      if(tbl) tbl.innerHTML=buildTxTableAcc(h.txs, bid, currentPage);
+    }
+  });
+}
+
+
+
+
 // ── Modal de confirmación propio ──────────────────────────────────────────────
 function mostrarModalConfirm(opts){
   // Eliminar modal anterior si existe
@@ -3100,9 +3203,20 @@ function buildTxTableAcc(txs, bid, page){
   if(total>1) html+=buildPagerAcc(bid,page,total);
   html+='</div>';
 
+  // Barra de acciones múltiples (oculta hasta que se seleccione algo)
+  html+='<div id="bulk-bar-'+bid+'" style="display:none;background:var(--gl);border:1.5px solid var(--g);border-radius:10px;padding:10px 14px;margin-bottom:10px;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">';
+  html+='<div style="font-size:13px;color:var(--gd);font-weight:600"><span id="bulk-count-'+bid+'">0</span> operaciones seleccionadas</div>';
+  html+='<div style="display:flex;gap:8px">';
+  html+='<button onclick="deseleccionarTodasAcc(\''+bid+'\')" style="padding:7px 14px;border:1px solid var(--b);background:#fff;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;color:var(--t2);font-family:inherit">Cancelar</button>';
+  html+='<button onclick="eliminarSeleccionadasAcc(\''+bid+'\')" style="padding:7px 14px;border:none;background:var(--red);color:#fff;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit">✕ Eliminar seleccionadas</button>';
+  html+='</div></div>';
+  // Barra de acciones para selección múltiple (oculta por defecto)
+  html+='<div id="bulk-bar-'+bid+'" style="display:none;background:var(--gd);color:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap"><div style="display:flex;align-items:center;gap:10px"><strong style="font-size:14px"><span id="bulk-count-'+bid+'">0</span> seleccionada(s)</strong></div><div style="display:flex;gap:6px"><button onclick="deseleccionarTodasAcc(\''+bid+'\')" style="padding:7px 14px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit">Deseleccionar</button><button onclick="eliminarSeleccionadasAcc(\''+bid+'\')" style="padding:7px 14px;background:var(--red);border:none;color:#fff;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">✕ Eliminar seleccionadas</button></div></div>';
   html+='<div style="overflow-x:auto;border:1px solid var(--b);border-radius:10px">';
   html+='<table style="width:100%;font-size:12.5px;border-collapse:collapse">';
   html+='<thead><tr style="background:var(--s2)">';
+  // Header con checkbox de selección múltiple
+  html+='<th style="padding:9px 8px;text-align:center;border-bottom:1px solid var(--b);width:34px"><input type="checkbox" id="cb-all-'+bid+'" onclick="toggleSelectAllAcc(\''+bid+'\',this.checked)" style="cursor:pointer;width:15px;height:15px" title="Seleccionar todas las visibles"/></th>';
   ['Fecha','Terminal','Tipo','Marca','Nombre','Monto','Estado','Acc'].forEach(function(h,i){
     html+='<th style="padding:9px 12px;text-align:'+(i===5?'right':i===7?'center':'left')+';font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--t3);border-bottom:1px solid var(--b)">'+h+'</th>';
   });
@@ -3116,7 +3230,8 @@ function buildTxTableAcc(txs, bid, page){
     // identifier: cupón si existe, sino #idx (índice REAL en h.txs, no de la página)
     var realIdx=semKey&&historial[semKey]?historial[semKey].txs.indexOf(t):-1;
     var ident=t.nroCupon&&t.nroCupon.trim()&&t.nroCupon.trim()!=='0'?t.nroCupon:'#'+realIdx;
-    html+='<tr style="background:'+bg+';border-bottom:1px solid var(--b)">'
+    html+='<tr style="background:'+bg+';border-bottom:1px solid var(--b)" data-bid="'+bid+'">'
+      +'<td style="padding:9px 8px;text-align:center"><input type="checkbox" class="cb-tx cb-tx-'+bid+'" data-ident="'+ident+'" onclick="onTxCheckChange(\''+bid+'\')" style="cursor:pointer;width:15px;height:15px"/></td>'
       +'<td style="padding:9px 12px;white-space:nowrap;color:var(--t2)">'+t.fecha+'</td>'
       +'<td style="padding:9px 12px;font-size:11px;font-family:monospace;color:var(--t3)">'+t.terminal+'</td>'
       +'<td style="padding:9px 12px"><span class="chip '+tc+'" style="font-size:10px;padding:2px 8px">'+(t.tipoOriginal||t.tipo)+'</span></td>'
