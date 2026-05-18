@@ -3343,6 +3343,13 @@ function renderMisComisiones(){
     +'</div>';
 }
 
+function onPropModoChange(){
+  var sel=document.getElementById('fpropmodo');
+  var wrap=document.getElementById('fprop-wrap');
+  if(!sel||!wrap) return;
+  wrap.style.display=sel.value==='fijo'?'block':'none';
+}
+
 function openModal(idx){
   editIdx=idx===undefined?null:idx;
   document.getElementById('mtitle').textContent=editIdx===null?'Nuevo Punto de Venta':'Editar Punto de Venta';
