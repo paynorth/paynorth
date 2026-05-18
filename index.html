@@ -176,6 +176,9 @@ tbody td{padding:12px 13px}
 .op-tabcontent{display:none}.op-tabcontent.active{display:block}
 .ops-count{font-size:12px;color:var(--t3);margin-bottom:12px}
 .no-results{text-align:center;padding:40px;color:var(--t3);font-size:14px}
+
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideUp{from{opacity:0;transform:translateY(12px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
 </style>
 </head>
 <body>
@@ -2963,11 +2966,9 @@ function renderHistorial(){
 
 
 function eliminarOpDelHistorial(semKey, txIdentifier){
-  // txIdentifier puede ser nroCupon o un índice si no hay cupón
   var h=historial[semKey];
   if(!h||!h.txs) return;
   var idx=-1;
-  // Primero buscar por cupón
   if(txIdentifier && txIdentifier.charAt(0)!=='#'){
     idx=h.txs.findIndex(function(t){return t.nroCupon===txIdentifier;});
   } else {
@@ -2975,25 +2976,102 @@ function eliminarOpDelHistorial(semKey, txIdentifier){
   }
   if(idx<0||idx>=h.txs.length){toast('Operación no encontrada');return;}
   var t=h.txs[idx];
-  if(!confirm('¿Eliminar esta operación?\n\nFecha: '+t.fecha+'\nTerminal: '+t.terminal+'\nMonto: $'+t.monto.toLocaleString('es-AR')+'\nTipo: '+t.tipo+'\nEstado: '+t.estado+'\n\nEsta acción no se puede deshacer.')){return;}
-  h.txs.splice(idx,1);
-  // Recalcular
-  var allApr=h.txs.filter(function(x){return x.estado==='aprobada';});
-  h.vol=allApr.reduce(function(s,x){return s+x.monto;},0);
-  h.com=allApr.reduce(function(s,x){
-    var pdv=pdvs.find(function(p){return p.terminal===x.terminal;});
-    if(!pdv) return s;
-    return s+(x.monto*(x.tipo==='credito'?pdv.comCred:x.tipo==='debito'?pdv.comDeb:pdv.comQr)/100);
-  },0);
-  h.costo=allApr.reduce(function(s,x){
-    return s+(x.monto*(x.tipo==='credito'?costoPN.cred:x.tipo==='debito'?costoPN.deb:costoPN.qr)/100);
-  },0);
-  h.txCount=h.txs.length;
-  h.savedAt=new Date().toISOString();
-  saveHistorial();
-  dbSaveHistorialWeek(h);
-  toast('Operación eliminada');
-  navigate('historial');
+
+  // Guardar contexto actual (bid abierto y página activa) para restaurar después
+  var openBid=null;
+  Object.keys(window._histKeys||{}).forEach(function(b){
+    if(window._histKeys[b]===semKey){
+      var body=document.getElementById(b);
+      if(body&&body.style.display!=='none') openBid=b;
+    }
+  });
+  var currentPage=openBid&&_txPager[openBid]?_txPager[openBid].page:1;
+
+  // Mostrar modal propio en lugar de confirm() nativo
+  mostrarModalConfirm({
+    title:'Eliminar operación',
+    icon:'✕',
+    iconColor:'var(--red)',
+    body:
+      '<div style="background:var(--gp);border-radius:10px;padding:14px 16px;margin-top:6px;font-size:13px;line-height:1.7">'
+      +'<div style="display:flex;justify-content:space-between"><span style="color:var(--t3)">Fecha</span><strong>'+t.fecha+'</strong></div>'
+      +'<div style="display:flex;justify-content:space-between"><span style="color:var(--t3)">Terminal</span><strong>'+t.terminal+'</strong></div>'
+      +'<div style="display:flex;justify-content:space-between"><span style="color:var(--t3)">Tipo</span><strong>'+(t.tipoOriginal||t.tipo)+'</strong></div>'
+      +'<div style="display:flex;justify-content:space-between"><span style="color:var(--t3)">Estado</span><strong>'+t.estado+'</strong></div>'
+      +'<div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--b);margin-top:8px"><span style="color:var(--t3)">Monto</span><strong style="color:var(--g);font-size:15px">$'+t.monto.toLocaleString('es-AR')+'</strong></div>'
+      +'</div>'
+      +'<div style="color:var(--t3);font-size:12px;margin-top:12px;text-align:center">Esta acción no se puede deshacer</div>',
+    confirmText:'Eliminar',
+    confirmStyle:'background:var(--red);color:#fff',
+    onConfirm:function(){
+      h.txs.splice(idx,1);
+      var allApr=h.txs.filter(function(x){return x.estado==='aprobada';});
+      h.vol=allApr.reduce(function(s,x){return s+x.monto;},0);
+      h.com=allApr.reduce(function(s,x){
+        var pdv=pdvs.find(function(p){return p.terminal===x.terminal;});
+        if(!pdv) return s;
+        return s+(x.monto*(x.tipo==='credito'?pdv.comCred:x.tipo==='debito'?pdv.comDeb:pdv.comQr)/100);
+      },0);
+      h.costo=allApr.reduce(function(s,x){
+        return s+(x.monto*(x.tipo==='credito'?costoPN.cred:x.tipo==='debito'?costoPN.deb:costoPN.qr)/100);
+      },0);
+      h.txCount=h.txs.length;
+      h.savedAt=new Date().toISOString();
+      saveHistorial();
+      dbSaveHistorialWeek(h);
+      toast('Operación eliminada');
+
+      // Refrescar solo la tabla del bid abierto, sin volver al historial
+      if(openBid){
+        var tbl=document.getElementById(openBid+'-table');
+        if(tbl){
+          tbl.innerHTML=buildTxTableAcc(h.txs, openBid, currentPage);
+          return;
+        }
+      }
+      // Fallback: si no se encuentra el contexto, recargar el historial
+      navigate('historial');
+    }
+  });
+}
+
+// ── Modal de confirmación propio ──────────────────────────────────────────────
+function mostrarModalConfirm(opts){
+  // Eliminar modal anterior si existe
+  var prev=document.getElementById('modal-confirm');
+  if(prev) prev.remove();
+
+  var bg=document.createElement('div');
+  bg.id='modal-confirm';
+  bg.style.cssText='position:fixed;inset:0;background:rgba(15,42,30,.45);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .15s ease-out';
+
+  var card=document.createElement('div');
+  card.style.cssText='background:#fff;border-radius:16px;max-width:420px;width:100%;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.25);animation:slideUp .2s ease-out';
+
+  var iconBg=opts.iconColor||'var(--red)';
+  card.innerHTML=
+    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">'
+    +'<div style="width:38px;height:38px;border-radius:10px;background:'+iconBg+'15;color:'+iconBg+';display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;flex-shrink:0">'+(opts.icon||'?')+'</div>'
+    +'<div style="font-size:17px;font-weight:700;color:var(--t)">'+(opts.title||'Confirmar')+'</div>'
+    +'</div>'
+    +'<div style="color:var(--t2);font-size:13px;line-height:1.6">'+(opts.body||'')+'</div>'
+    +'<div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">'
+    +'<button id="mc-cancel" style="padding:10px 18px;border:1.5px solid var(--b);background:#fff;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;color:var(--t2);font-family:inherit">Cancelar</button>'
+    +'<button id="mc-confirm" style="padding:10px 20px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;'+(opts.confirmStyle||'background:var(--g);color:#fff')+'">'+(opts.confirmText||'Aceptar')+'</button>'
+    +'</div>';
+
+  bg.appendChild(card);
+  document.body.appendChild(bg);
+
+  function close(){bg.remove();}
+  bg.addEventListener('click',function(e){if(e.target===bg) close();});
+  card.querySelector('#mc-cancel').onclick=close;
+  card.querySelector('#mc-confirm').onclick=function(){close();if(opts.onConfirm) opts.onConfirm();};
+  // Escape para cerrar
+  var escHandler=function(e){if(e.key==='Escape'){close();document.removeEventListener('keydown',escHandler);}};
+  document.addEventListener('keydown',escHandler);
+  // Focus en el botón de confirmación
+  setTimeout(function(){card.querySelector('#mc-confirm').focus();},50);
 }
 
 
